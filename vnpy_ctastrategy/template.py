@@ -323,12 +323,14 @@ class CtaTemplate(ABC):
         if self.inited:
             self.cta_engine.put_strategy_event(self)
 
-    def send_email(self, msg: str) -> None:
+    def send_notification(self, msg: str) -> None:
         """
-        Send email to default receiver.
+        Push notification through all configured channels.
         """
         if self.inited:
-            self.cta_engine.send_email(msg, self)
+            self.cta_engine.send_notification(msg, self)
+
+    send_email = send_notification
 
     def sync_data(self) -> None:
         """

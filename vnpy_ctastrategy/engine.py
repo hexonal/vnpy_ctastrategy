@@ -958,13 +958,13 @@ class CtaEngine(BaseEngine):
         event: Event = Event(type=EVENT_CTA_LOG, data=log)
         self.event_engine.put(event)
 
-    def send_email(self, msg: str, strategy: CtaTemplate | None = None) -> None:
+    def send_notification(self, msg: str, strategy: CtaTemplate | None = None) -> None:
         """
-        Send email to default receiver.
+        Push notification through all configured channels.
         """
         if strategy:
             subject: str = f"{strategy.strategy_name}"
         else:
             subject = _("CTA策略引擎")
 
-        self.main_engine.send_email(subject, msg, None)
+        self.main_engine.send_notification(msg, subject)

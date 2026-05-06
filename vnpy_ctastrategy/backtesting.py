@@ -992,11 +992,13 @@ class BacktestingEngine:
         msg = f"{self.datetime}\t{msg}"
         self.logs.append(msg)
 
-    def send_email(self, msg: str, strategy: CtaTemplate | None = None) -> None:
+    def send_notification(self, msg: str, strategy: CtaTemplate | None = None) -> None:
         """
-        Send email to default receiver.
+        Push notification through all configured channels.
         """
         pass
+
+    send_email = send_notification
 
     def sync_strategy_data(self, strategy: CtaTemplate) -> None:
         """
