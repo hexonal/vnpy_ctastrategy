@@ -31,6 +31,7 @@ from vnpy.trader.optimize import (
     run_ga_optimization
 )
 
+from .robust_metrics import RobustMetrics, calculate_robust_metrics
 from .base import (
     BacktestingMode,
     EngineType,
@@ -338,6 +339,12 @@ class BacktestingEngine:
         return_drawdown_ratio: float = 0
         rgr_ratio: float = 0
 
+        # Robustness metrics (fork addition) — see robust_metrics.py
+        regressed_annual_return: float = 0
+        r_cubed: float = 0
+        robust_sharpe: float = 0
+        drawdown_episode_count: int = 0
+
         # Check if balance is always positive
         positive_balance: bool = False
 
@@ -419,6 +426,21 @@ class BacktestingEngine:
             else:
                 return_drawdown_ratio = 0
 
+            # Robustness metrics (fork addition). Unlike annual_return, which
+            # only reads the first and last balance, these regress the whole
+            # equity curve and so react to its shape. See robust_metrics.py —
+            # including why RAR must not be used as an optimization target.
+            robust: RobustMetrics = calculate_robust_metrics(
+                balance=df["balance"].to_numpy(),
+                daily_returns=df["return"].to_numpy(),
+                capital=self.capital,
+                annual_days=self.annual_days,
+            )
+            regressed_annual_return = robust.regressed_annual_return
+            r_cubed = robust.r_cubed
+            robust_sharpe = robust.robust_sharpe
+            drawdown_episode_count = robust.drawdown_episode_count
+
             # Calculate GRR indicator
             cagr_value: float = annual_return / 100
 
@@ -484,6 +506,10 @@ class BacktestingEngine:
             self.output(f"EWM Sharpe：\t{ewm_sharpe:,.2f}")
             self.output(_("收益回撤比：\t{:,.2f}").format(return_drawdown_ratio))
             self.output(f"RGR Ratio：\t{rgr_ratio:,.2f}")
+            self.output(_("回归年化收益：\t{:,.2f}%").format(regressed_annual_return))
+            self.output(f"R-Cubed：\t{r_cubed:,.2f}")
+            self.output(f"Robust Sharpe：\t{robust_sharpe:,.2f}")
+            self.output(_("回撤段数：\t{}").format(drawdown_episode_count))
 
         statistics: dict = {
             "start_date": start_date,
@@ -514,6 +540,10 @@ class BacktestingEngine:
             "ewm_sharpe": ewm_sharpe,
             "return_drawdown_ratio": return_drawdown_ratio,
             "rgr_ratio": rgr_ratio,
+            "regressed_annual_return": regressed_annual_return,
+            "r_cubed": r_cubed,
+            "robust_sharpe": robust_sharpe,
+            "drawdown_episode_count": drawdown_episode_count,
         }
 
         # Filter potential error infinite value
