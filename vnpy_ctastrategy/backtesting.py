@@ -31,7 +31,13 @@ from vnpy.trader.optimize import (
     run_ga_optimization
 )
 
+from .permutation_test import (
+    PERMUTATION_FIELD_DEFAULTS,
+    PERMUTATION_SETTING_KEYS,
+    attach_permutation_statistics,
+)
 from .robust_metrics import RobustMetrics, calculate_robust_metrics
+from .sharpe_inference import SharpeInference, sharpe_inference, statistics_fields
 from .base import (
     BacktestingMode,
     EngineType,
@@ -94,6 +100,12 @@ class BacktestingEngine:
         self.daily_results: dict[Date, DailyResult] = {}
         self.daily_df: DataFrame = DataFrame()
 
+        # Block-permutation significance test (fork addition). Opt-in because
+        # it costs ~90ms per call at B=1000/n=600, which a 5000-combo grid
+        # search would pay 5000 times. See enable_permutation_test().
+        self.permutation_enabled: bool = False
+        self.permutation_settings: dict = {}
+
     def clear_data(self) -> None:
         """
         Clear all data of last backtesting.
@@ -151,6 +163,38 @@ class BacktestingEngine:
         self.risk_free = risk_free
         self.annual_days = annual_days
         self.half_life = half_life
+
+    def enable_permutation_test(
+        self, enabled: bool = True, /, **settings: object
+    ) -> None:
+        """Turn on the block-permutation significance test in calculate_statistics.
+
+        Off by default. Every other number in the statistics dict is in-sample
+        description; this one answers "could this be luck?" by reshuffling the
+        exposure series in blocks while holding the market path fixed, and
+        reporting where the observed statistic falls in that null distribution.
+
+        settings is forwarded verbatim to permutation_statistics(); see that
+        function for the full parameter list. Unknown keys raise immediately
+        rather than being swallowed by the fail-open wrapper downstream.
+
+        enabled is positional-only so that **settings can never accidentally
+        bind to it — a setting named "enabled" would otherwise silently flip
+        the switch instead of being rejected as unknown.
+
+        Read permutation_test.py section 5 before wiring perm_p_value into an
+        optimization target: minimising p over a grid re-introduces exactly the
+        selection bias the test is meant to expose.
+        """
+        unknown: set = set(settings) - PERMUTATION_SETTING_KEYS
+        if unknown:
+            raise ValueError(
+                _("未知的重排检验参数：{}，可选：{}").format(
+                    sorted(unknown), sorted(PERMUTATION_SETTING_KEYS)
+                )
+            )
+        self.permutation_enabled = enabled
+        self.permutation_settings = dict(settings)
 
     def add_strategy(self, strategy_class: type[CtaTemplate], setting: dict) -> None:
         """"""
@@ -345,6 +389,35 @@ class BacktestingEngine:
         robust_sharpe: float = 0
         drawdown_episode_count: int = 0
 
+        # Sharpe significance (fork addition) — see sharpe_inference.py.
+        # Every metric above is in-sample description; these answer "could this
+        # be luck?". Defaults mean "not computed", not "insignificant".
+        inference: SharpeInference | None = None
+        sharpe_fields: dict = {
+            "sharpe_se": 0.0,
+            "sharpe_tstat": 0.0,
+            "sharpe_pvalue": 1.0,
+            "sharpe_pvalue_one_sided": 1.0,
+            "sharpe_ci_low": 0.0,
+            "sharpe_ci_high": 0.0,
+            "sharpe_significant": False,
+            "sharpe_method": "not_computed",
+            "sharpe_hac_lags": 0,
+            "sharpe_hac_inflation": 0.0,
+            "sharpe_bootstrap_pvalue": 1.0,
+            "sharpe_required_for_significance": 0.0,
+            "sharpe_skew": 0.0,
+            "sharpe_kurtosis": 0.0,
+            "sharpe_autocorr_lag1": 0.0,
+            "sharpe_ljung_box_p": 1.0,
+        }
+
+        # Block-permutation test (fork addition) — see permutation_test.py.
+        # Defaults mean "not computed": p=1.0 and significant=False, so a
+        # target function that reads these keys degrades to "no evidence"
+        # rather than raising KeyError when the test is switched off.
+        perm_fields: dict = dict(PERMUTATION_FIELD_DEFAULTS)
+
         # Check if balance is always positive
         positive_balance: bool = False
 
@@ -441,6 +514,53 @@ class BacktestingEngine:
             robust_sharpe = robust.robust_sharpe
             drawdown_episode_count = robust.drawdown_episode_count
 
+            # Sharpe significance (fork addition). Lo (2002) standard error with
+            # a Newey-West HAC correction for serial dependence, plus a
+            # stationary-bootstrap second opinion. Never let a statistics
+            # failure kill a backtest — degrade to the "not computed" defaults.
+            if return_std:
+                try:
+                    inference = sharpe_inference(
+                        df["return"].to_numpy(),
+                        annual_days=self.annual_days,
+                        # Unit care: upstream builds sharpe_ratio from
+                        # daily_return / return_std, which are percent-scale
+                        # (df["return"] * 100), so its daily_risk_free is also
+                        # percent-scale. We feed raw df["return"], so the same
+                        # rate must be divided by 100 to land in fraction scale.
+                        # Without the /100 a risk_free of 2 shifts the Sharpe by
+                        # ~180 units. Pinned by test_risk_free_matches_upstream.
+                        risk_free_period=(
+                            self.risk_free / np.sqrt(self.annual_days) / 100.0
+                        ),
+                        method="hac",
+                        n_boot=999,
+                    )
+                    sharpe_fields = statistics_fields(inference)
+                except (ValueError, FloatingPointError) as exc:
+                    self.output(_("Sharpe 显著性检验跳过：{}").format(exc))
+
+            # Block-permutation significance test (fork addition). Reshuffles
+            # the exposure series in blocks with the market path held fixed, so
+            # long-only market beta sits in both the observed value and the null
+            # centre and cancels; what is left is timing skill. Costly enough to
+            # be opt-in, and fail-open — a diagnostic must never kill a backtest.
+            if self.permutation_enabled:
+                # Engine values are defaults; explicit settings win, so a caller
+                # can override size/risk_free without a duplicate-kwarg TypeError.
+                perm_kwargs: dict = {
+                    "size": self.size,
+                    "risk_free": self.risk_free,
+                    **self.permutation_settings,
+                }
+                perm_fields = attach_permutation_statistics(
+                    perm_fields,
+                    df,
+                    capital=self.capital,
+                    annual_days=self.annual_days,
+                    **perm_kwargs,
+                )
+
             # Calculate GRR indicator
             cagr_value: float = annual_return / 100
 
@@ -511,6 +631,43 @@ class BacktestingEngine:
             self.output(f"Robust Sharpe：\t{robust_sharpe:,.2f}")
             self.output(_("回撤段数：\t{}").format(drawdown_episode_count))
 
+            if inference is not None:
+                self.output("-" * 30)
+                self.output(_("Sharpe 显著性检验"))
+                self.output(inference.report())
+
+            if self.permutation_enabled:
+                self.output("-" * 30)
+                self.output(_("分块重排显著性检验"))
+                error: object = perm_fields.get("perm_error")
+                if error:
+                    self.output(_("跳过：{}").format(error))
+                else:
+                    self.output(
+                        _("统计量 {}：观测 {:,.4f}，零分布中心 {:,.4f}（std {:,.4f}）").format(
+                            perm_fields["perm_statistic"],
+                            perm_fields["perm_observed"],
+                            perm_fields["perm_null_mean"],
+                            perm_fields["perm_null_std"],
+                        )
+                    )
+                    self.output(
+                        _("p 值 {:.4f}（B={}，块长 {}）").format(
+                            perm_fields["perm_p_value"],
+                            perm_fields["perm_n_permutations"],
+                            perm_fields["perm_block_length"],
+                        )
+                    )
+                    if not perm_fields["perm_has_power"]:
+                        self.output(_("⚠ 零分布退化，本次检验没有功效，p 值不可解读"))
+                    else:
+                        self.output(
+                            _("80% 功效门槛：择时增量需 ≥ {:,.4f}；本次实测增量 {:,.4f}").format(
+                                perm_fields["perm_min_detectable"],
+                                perm_fields["perm_observed"] - perm_fields["perm_null_mean"],
+                            )
+                        )
+
         statistics: dict = {
             "start_date": start_date,
             "end_date": end_date,
@@ -544,6 +701,8 @@ class BacktestingEngine:
             "r_cubed": r_cubed,
             "robust_sharpe": robust_sharpe,
             "drawdown_episode_count": drawdown_episode_count,
+            **sharpe_fields,
+            **perm_fields,
         }
 
         # Filter potential error infinite value

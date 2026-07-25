@@ -765,6 +765,17 @@ class CtaEngine(BaseEngine):
             self.write_log(_("策略{}移除失败，请先停止").format(strategy.strategy_name))
             return False
 
+        # Let the strategy drop its own persisted files first. It must run
+        # before the engine forgets the strategy, and a failure here cannot be
+        # allowed to abort the removal — a strategy stuck in the engine is
+        # worse than a leftover file.
+        try:
+            strategy.on_remove()
+        except Exception:
+            self.write_log(
+                _("策略{}的 on_remove 回调失败，遗留文件需手工清理").format(strategy_name)
+            )
+
         # Remove setting
         self.remove_strategy_setting(strategy_name)
 

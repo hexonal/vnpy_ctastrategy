@@ -110,6 +110,18 @@ class CtaTemplate(ABC):
         """
         return
 
+    def on_remove(self) -> None:
+        """
+        Callback when strategy is removed from the engine.
+
+        Last chance to drop anything the strategy persisted outside of
+        cta_strategy_data.json — the engine cleans up its own two files but
+        knows nothing about a strategy's private sidecars. Anything left
+        behind is picked up again by the next strategy created under the same
+        name, which is how a removed position comes back from the dead.
+        """
+        return
+
     def on_tick(self, tick: TickData) -> None:
         """
         Callback of new tick data update.
