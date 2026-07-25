@@ -82,4 +82,13 @@ strict_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
 warn_no_return = true
-ignore_missing_imports = true 
+ignore_missing_imports = true
+
+# Point pyright at the shared VeighNa virtualenv. Without it, every vnpy import
+# resolves against the system interpreter and reports as unresolved, burying the
+# real diagnostics. Relative so it travels with the checkout: this fork sits
+# beside the vnpy fork that owns the venv.
+[tool.pyright]
+venvPath = ".."
+venv = "vnpy/.venv"
+typeCheckingMode = "standard" 
