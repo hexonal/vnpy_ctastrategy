@@ -960,14 +960,21 @@ class EngineRunner:
         engine = self.new_engine(run_start, end)
         engine.add_strategy(self.strategy_class, dict(setting))
 
+        # 数据库返回的是 tz-aware 时间戳，调用方传进来的往往是裸 datetime，
+        # 直接比较会抛 TypeError。统一去掉时区后再比 —— 窗口筛选不依赖时区。
+        lo = _naive(run_start)
+        hi = self.window_end(end)
+
         if self.cache_bars:
-            # 数据库返回的是 tz-aware 时间戳，调用方传进来的往往是裸 datetime，
-            # 直接比较会抛 TypeError。统一去掉时区后再比 —— 日线窗口筛选不依赖时区。
-            lo = _naive(run_start)
-            hi = _naive(end).replace(hour=23, minute=59, second=59)
             engine.history_data = [b for b in self.bars() if lo <= _naive(b.datetime) <= hi]
         if not engine.history_data:
             engine.load_data()
+            # load_data 走的是 engine.end，而 set_parameters 会把它撑到当日
+            # 23:59:59。日线下那仍是同一根，日内下就是另一个窗口了 —— 两条
+            # 取数路径必须交出同一段，否则 cache_bars 开关会改变绩效。
+            engine.history_data = [
+                b for b in engine.history_data if lo <= _naive(b.datetime) <= hi
+            ]
         if not engine.history_data:
             return DataFrame()
 
@@ -980,6 +987,20 @@ class EngineRunner:
             # 预热段只用来把指标和仓位喂热，不计入绩效
             df = df[[d >= _naive(start).date() for d in df.index]]
         return df
+
+    def window_end(self, end: datetime) -> datetime:
+        """窗口上界（含）。日线撑到当日收盘，日内按原值取。
+
+        日线的 `end` 通常是一个日期（00:00），意思是"含这一天"，所以要撑到
+        23:59:59 才能把当天那根收进来。日内周期下 `end` 是一根真实 K 线的
+        时间戳，再撑到 23:59:59 就会把当天剩下的 K 线一并收进来 ——
+        `ThreeWaySplit` 的相邻两段若落在同一自然日（15m 线下几乎必然），
+        前一段就会吃进后一段的数据，VALID 的绩效里混进 TEST 段。
+        """
+        naive = _naive(end)
+        if self.interval in (Interval.MINUTE, Interval.HOUR):
+            return naive
+        return naive.replace(hour=23, minute=59, second=59)
 
     def statistics(self, df: DataFrame) -> dict:
         """对任意 daily_df（含拼接出来的样本外曲线）算标准 statistics 面板。

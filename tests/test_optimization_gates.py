@@ -51,10 +51,16 @@ from vnpy_ctastrategy.optimization_gates import (
     OptimizationGateConfig,
     OptimizationGateReport,
     OptimizationResults,
+    bankrupt_columns,
     returns_matrix_from_payloads,
+    went_bankrupt,
     run_optimization_gates,
 )
 from vnpy_ctastrategy.overfitting import (
+    PBONull,
+    PBOResult,
+    PBOStudy,
+    SampleDiagnosis,
     annualised_sharpe,
     daily_log_returns,
     pbo_from_matrix,
@@ -252,8 +258,12 @@ def test_gates_separate_signal_from_noise() -> None:
     assert noise.pbo.result.pbo - signal.pbo.result.pbo > 0.30
     assert signal.pbo.result.pbo <= 0.10 < noise.pbo.result.pbo
 
-    assert signal.passed is True
     assert noise.passed is False
+    # passed 另外要求零分布校准（见 OptimizationGateReport.passed），而
+    # NO_NULL_CONFIG 下没有 p 值，所以"信号组能过闸"这一条要用带零分布的
+    # 配置来断言 —— 判别力与能否过闸是两件事。
+    assert signal.passed is False
+    assert gate(with_signal(base, annual_sharpe=2.5)).passed is True
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -714,3 +724,247 @@ def test_wrap_evaluate_binds_new_parameters_by_keyword(
     }
     # 位置参数在 setting 之前截止，setting 由优化器追加
     assert len(func.args) == 12                     # type: ignore[attr-defined]
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 爆仓组不得进入 PBO 矩阵
+# ══════════════════════════════════════════════════════════════════════
+
+def _bankrupt_column(n_obs: int) -> np.ndarray:
+    """一条把账户打穿、之后继续"盈利"的净值曲线。
+
+    杠杆网格里很常见：某组手数把 balance 打到 0 以下，引擎的 positive_balance
+    闸把 statistics 清成全 0（total_days=0），但 net_pnl 序列照样交回来。
+    穿零之后 balance 为负，`daily_log_returns` 里 x = balance/pre_balance
+    是负/负 = 正，于是每一天都算出正的对数收益 —— CSCV 看到的是一条单调
+    "盈利"的高夏普列。
+    """
+    column = np.full(n_obs, CAPITAL * 0.002)
+    column[0] = -CAPITAL * 1.35                 # 第一天就打穿
+    return column
+
+
+def test_bankrupt_column_is_excluded_from_the_matrix() -> None:
+    """穿零的列必须整列剔除，而不是靠 log(负/负) 变成正收益混进来。"""
+    n_obs = 300
+    good = noise_pnl(seed=7, n_obs=n_obs, n_cols=2)
+    payloads = [
+        (_days(n_obs), good[:, 0]),
+        (_days(n_obs), _bankrupt_column(n_obs)),
+        (_days(n_obs), good[:, 1]),
+    ]
+
+    matrix, dropped = returns_matrix_from_payloads(payloads, CAPITAL)
+
+    assert dropped == [1]
+    assert matrix.shape[1] == 2
+    assert bankrupt_columns(payloads, CAPITAL) == [1]
+
+
+def test_bankruptcy_judgement_matches_the_engine() -> None:
+    """爆仓判据必须与引擎的 positive_balance 同义，否则两处会各说各话。"""
+    n_obs = 50
+    assert went_bankrupt(_bankrupt_column(n_obs), CAPITAL) is True
+    assert went_bankrupt(np.full(n_obs, CAPITAL * 0.001), CAPITAL) is False
+    # 恰好打到 0 也算爆仓（引擎用的是 balance > 0 全真）
+    exactly_zero = np.array([-CAPITAL, 0.0, 0.0])
+    assert went_bankrupt(exactly_zero, CAPITAL) is True
+
+
+def test_bankrupt_column_does_not_flip_the_pbo_gate() -> None:
+    """闸的判定不得被一条爆仓曲线从"拒绝"翻成"通过"。"""
+    n_obs = 300
+    pnl = noise_pnl(seed=3, n_obs=n_obs, n_cols=12)
+    results, payloads = make_optimization_output(pnl)
+
+    poisoned = list(payloads)
+    poisoned[0] = (_days(n_obs), _bankrupt_column(n_obs))
+
+    report = run_optimization_gates(
+        results,
+        target_name="sharpe_ratio",
+        annual_days=ANNUAL_DAYS,
+        capital=CAPITAL,
+        payloads=poisoned,
+        config=FAST_CONFIG,
+    )
+
+    assert report.pbo is not None
+    # 纯噪声网格的 PBO 应当高；爆仓列若混进来会把它压到 0 附近。
+    assert report.pbo.result.pbo > 0.25
+    assert any("爆仓" in note for note in report.notes)
+
+
+def test_bankruptcy_exclusion_is_recorded_not_silent() -> None:
+    """剔除必须留痕 —— 静默丢列等于把证据也一起丢了。"""
+    n_obs = 300
+    pnl = noise_pnl(seed=11, n_obs=n_obs, n_cols=6)
+    results, payloads = make_optimization_output(pnl)
+    poisoned = list(payloads)
+    poisoned[2] = (_days(n_obs), _bankrupt_column(n_obs))
+
+    report = run_optimization_gates(
+        results,
+        target_name="sharpe_ratio",
+        annual_days=ANNUAL_DAYS,
+        capital=CAPITAL,
+        payloads=poisoned,
+        config=FAST_CONFIG,
+    )
+
+    assert any("爆仓" in note for note in report.notes)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# passed 必须与模块自己的 calibrated verdict 一致
+# ══════════════════════════════════════════════════════════════════════
+
+def _study_with(pbo_value: float, null_values: np.ndarray) -> PBOStudy:
+    """一个只填了本测试要读的字段的 PBOStudy。
+
+    直接构造而不是"跑一个恰好落在窄带里的网格"：那条带宽只有 0.08，
+    靠调种子去命中它，测的就成了随机数生成器而不是判据。
+    """
+    result = PBOResult(
+        pbo=pbo_value,
+        n_configs=20,
+        n_blocks=10,
+        block_size=60,
+        n_obs_used=600,
+        n_combinations=252,
+        offset=0,
+        logits=np.zeros(252),
+        relative_ranks=np.full(252, 0.5),
+        is_perf_selected=np.zeros(252),
+        oos_perf_selected=np.zeros(252),
+        selected_counts=np.zeros(20),
+        rank_ic=0.0,
+        degradation_slope=0.0,
+        degradation_intercept=0.0,
+        prob_oos_loss=0.5,
+        median_oos_selected=0.0,
+        median_oos_all=0.0,
+        tie_fraction=0.0,
+    )
+    null = PBONull(
+        n_sims=len(null_values),
+        n_obs=600,
+        n_configs=20,
+        n_blocks=10,
+        correlation=0.7,
+        mean=float(np.mean(null_values)),
+        sd=float(np.std(null_values)),
+        q05=float(np.quantile(null_values, 0.05)),
+        q50=float(np.quantile(null_values, 0.50)),
+        q95=float(np.quantile(null_values, 0.95)),
+        values=null_values,
+    )
+    return PBOStudy(
+        result=result,
+        stability={},
+        null=null,
+        diagnosis=SampleDiagnosis(
+            n_obs=600,
+            n_blocks=10,
+            block_size=60,
+            n_combinations=252,
+            obs_per_side=300,
+            sharpe_se_per_side=0.2,
+            min_detectable_sharpe=0.5,
+            trades_total=None,
+            trades_per_side=None,
+            block_vs_holding=None,
+        ),
+        correlation=0.7,
+        matrix_shape=(600, 20),
+    )
+
+
+def test_passed_requires_the_null_calibrated_p_value() -> None:
+    """PBO 低于 0.25 但零分布下不显著时，passed 不得与报告文字相反。
+
+    固定 0.25 阈值忽略零分布：T=600/N=20 这种网格的零分布 5% 分位约在
+    0.17，于是 (0.17, 0.25] 这一段里 `report.text()` 印"与选参毫无信息
+    不可区分"，而 `report.passed` 返回 True —— 人读的结论与机读的字段相反。
+    """
+    # 零分布集中在 0.16 附近：观测到的 0.23 完全在它的常见范围内。
+    null_values = np.linspace(0.10, 0.55, 200)
+    study = _study_with(0.23, null_values)
+
+    # DSR 必须明确通过，否则 passed 会因为 DSR 而不是 PBO 返回 False，
+    # 这条测试就测不到它想测的那一段。
+    report = OptimizationGateReport(
+        dsr={"deflated_sharpe_ratio": 0.99, "trustworthy": True},
+        dsr_detail=None,
+        pbo=study,
+        target_name="sharpe_ratio",
+        annual_days=ANNUAL_DAYS,
+        n_results=20,
+        source="test",
+        matrix_shape=(600, 20),
+        config=FAST_CONFIG,
+    )
+    assert report.dsr_significant is True
+
+    assert report.pbo is not None
+    assert report.pbo.result.pbo <= 0.25       # 固定阈值会放行
+    assert report.pbo.p_value >= 0.05          # 但零分布说它不可区分
+    assert "不通过" in report.pbo_verdict
+    assert report.passed is False
+
+
+def test_passed_is_false_when_the_null_was_not_computed() -> None:
+    """没算零分布 = 没校准，缺证据不是证据。"""
+    n_obs = 300
+    pnl = noise_pnl(seed=5, n_obs=n_obs, n_cols=8)
+    pnl[:, 0] += 3.0 / math.sqrt(ANNUAL_DAYS) * (CAPITAL * 0.01)
+
+    report = gate(pnl, config=NO_NULL_CONFIG)
+
+    assert report.pbo is not None
+    assert report.pbo.null is None
+    assert report.passed is False
+    assert "未校准" in report.pbo_verdict
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 闸的结论不得因 output=False 而消失
+# ══════════════════════════════════════════════════════════════════════
+
+def test_gate_report_is_emitted_even_when_output_is_false() -> None:
+    """GUI 回测器用 output=False 调寻优，且从不读 `.gates`。
+
+    那条路径上零分布照跑（约 18 秒），报告却既不打印也不显示 —— 成本付了，
+    保护没拿到，用户看到的还是那张按目标值排序的参数表。`output` 抑制的应当
+    是逐组参数的刷屏，而不是唯一那段判定结论。
+
+    `vnpy_ctabacktester.BacktesterEngine.init_engine` 把 `engine.output` 重绑
+    到它自己的日志泵（`self.backtesting_engine.output = self.write_log`），
+    所以 `self.output` 正是通往 GUI 日志面板的那个通道。
+    """
+    engine = BacktestingEngine()
+    engine.capital = CAPITAL
+    engine.annual_days = ANNUAL_DAYS
+
+    emitted: list[str] = []
+    engine.output = emitted.append                  # type: ignore[method-assign]
+
+    pnl = noise_pnl(seed=99, n_obs=300, n_cols=8)
+    results, payloads = make_optimization_output(pnl)
+    raw = [(*row, payload) for row, payload in zip(results, payloads, strict=True)]
+
+    out = engine._finish_optimization(
+        raw,
+        target_name="sharpe_ratio",
+        output=False,
+        gates=True,
+        gate_config=FAST_CONFIG,
+        collect_returns=True,
+        source="bf",
+    )
+
+    assert out.gates is not None
+    joined = "\n".join(emitted)
+    assert "PBO" in joined, "闸的结论在 output=False 下被丢弃了"
+    # 逐组参数的刷屏仍然要被 output=False 抑制
+    assert not any(line.startswith("参数：") for line in emitted)

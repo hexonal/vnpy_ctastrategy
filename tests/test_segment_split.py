@@ -931,3 +931,38 @@ def test_guard_runs_before_forwarding(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SegmentLeakError):
         engine.run_bf_optimization(_empty_optimization_setting())
     assert called == []
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 接入：闸必须能被 import 到，否则没人会走它
+# ══════════════════════════════════════════════════════════════════════
+
+def test_segment_api_is_exported_from_the_package() -> None:
+    """样本外纪律必须从包顶层可达。
+
+    在此之前 `SegmentedRunner` 除自身测试外零调用点，也不在 `__all__` 里：
+    研究者按常规姿势 `set_parameters(全区间)` + `run_bf_optimization` 就
+    绕过了 TEST 段禁扫参与查看次数预算这两道闸。import 不到的闸等于没有闸。
+    """
+    import vnpy_ctastrategy as pkg
+
+    for name in (
+        "Segment",
+        "SegmentedRunner",
+        "SegmentLeakError",
+        "SegmentBudgetExhaustedError",
+        "ThreeWaySplit",
+        "make_three_way_split",
+    ):
+        assert name in pkg.__all__, f"{name} 不在 __all__ 里"
+        assert hasattr(pkg, name), f"{name} 无法从包顶层取到"
+
+
+def test_exported_segment_types_are_the_same_objects() -> None:
+    """导出的必须是同一批对象，不能是同名的另一份。"""
+    import vnpy_ctastrategy as pkg
+    from vnpy_ctastrategy import segments as seg_module
+
+    assert pkg.SegmentedRunner is seg_module.SegmentedRunner
+    assert pkg.Segment is seg_module.Segment
+    assert pkg.SegmentLeakError is seg_module.SegmentLeakError

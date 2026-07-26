@@ -79,8 +79,11 @@ class OptimizationGateConfig:
     n_offsets       块网格相位数。块边界位置是任意的，
                     多相位跑一遍才知道 PBO 估计本身稳不稳。
     n_null_sims     PBO 零分布的模拟次数。约 0.09 秒/次；置 0 跳过（不推荐，
-                    跳过后只能拿固定阈值判据，没有 p 值）。
+                    跳过后只能拿固定阈值判据，没有 p 值 —— `passed` 会因
+                    "未校准"直接判不通过）。
     seed            零分布模拟的随机种子，固定以保证同一批结果可复现。
+    pbo_max         `passed` 允许的 PBO 点估计上限。原先是写死在 `passed`
+                    里的 0.25 字面量，提出来是为了让阈值与判据在同一处可见。
     """
 
     confidence: float = DEFAULT_CONFIDENCE
@@ -90,10 +93,13 @@ class OptimizationGateConfig:
     n_offsets: int = 8
     n_null_sims: int = 200
     seed: int = 20260725
+    pbo_max: float = 0.25
 
     def __post_init__(self) -> None:
         if not 0.0 < self.confidence < 1.0:
             raise ValueError(f"confidence 必须落在 (0, 1)，收到 {self.confidence}")
+        if not 0.0 < self.pbo_max < 1.0:
+            raise ValueError(f"pbo_max 必须落在 (0, 1)，收到 {self.pbo_max}")
         if self.n_blocks is not None and (self.n_blocks < 2 or self.n_blocks % 2):
             raise ValueError(f"n_blocks 必须是 ≥2 的偶数或 None，收到 {self.n_blocks}")
         if self.n_offsets < 1:
@@ -182,14 +188,31 @@ class OptimizationGateReport:
     def pbo_verdict(self) -> str:
         if self.pbo is None:
             return "PBO 未计算（见 notes）"
+        if self.pbo.null is None:
+            # 没有零分布就没有 p 值，只能拿固定阈值说话。说清楚这一点，
+            # 免得"稳健"被当成已经排除了运气。
+            return f"{self.pbo.verdict}（PBO 未校准：未跑零分布，无 p 值）"
         return self.pbo.verdict
 
     @property
     def passed(self) -> bool:
-        """两道闸是否都明确通过。任一没算成 = 未通过（缺证据不是证据）。"""
+        """两道闸是否都明确通过。任一没算成 = 未通过（缺证据不是证据）。
+
+        PBO 一侧必须与 `pbo_verdict` 用同一套判据，否则同一份报告会自相
+        矛盾：`text()` 印"与'选参毫无信息'不可区分"，而按 `.passed` 自动
+        放行的脚本把这个网格判为可上生产。零分布已算时，要求点估计低于
+        `PBO_MAX` **且** 在零分布下显著；没算零分布 = 未校准 = 不通过。
+        """
         if self.dsr_significant is not True or self.pbo is None:
             return False
-        return self.pbo.result.pbo <= 0.25
+        if self.pbo.result.pbo > self.config.pbo_max:
+            return False
+        if self.pbo.null is None:
+            return False                    # 未校准，缺证据不是证据
+        p_value = self.pbo.p_value
+        if not math.isfinite(p_value):
+            return False
+        return p_value < 1.0 - self.config.confidence
 
     def as_dict(self) -> dict[str, Any]:
         """只含标量与嵌套 dict，便于落 JSON / CSV。"""
@@ -276,8 +299,17 @@ def returns_matrix_from_payloads(
     它要的 daily_df 形状。**不另写一套对齐逻辑** —— 两套口径一旦分叉，
     PBO 里的夏普就和面板上的夏普不是同一个数了。
 
-    返回 (矩阵, 被剔除的列下标)。空 payload（该组回测没有任何成交日 / 爆仓）
-    会被剔除，下标随返回值交回调用方，由调用方决定怎么在报告里交代。
+    返回 (矩阵, 被剔除的列下标)。空 payload（该组回测没有任何成交日）会被剔除，
+    下标随返回值交回调用方，由调用方决定怎么在报告里交代。
+
+    **爆仓组同样剔除**，理由与"空"不同，必须单独说清：引擎的
+    `calculate_statistics` 遇到 balance ≤ 0 会走 positive_balance 分支，把
+    statistics 清成全 0（total_days=0）—— 但它照样把 net_pnl 序列交回来。
+    而 `daily_log_returns` 复刻引擎口径时只做 `x[x <= 0] = nan`：穿零之后
+    balance 一直为负，x = 负/负 = **正**，于是爆仓段的每一天都算出正的对数
+    收益。CSCV 眼里那就是一条单调"盈利"的高夏普列，样本内外双双第一，
+    足以把整个网格的 PBO 从 0.5 拉到 0 —— 一个本该被拒的网格因此拿到绿灯。
+    引擎已经判定这组参数把账户打穿了，这里就不该让它的净值曲线继续投票。
     """
     frames: list[DataFrame] = []
     for payload in payloads:
@@ -293,8 +325,44 @@ def returns_matrix_from_payloads(
             raise ValueError(
                 f"payload 的日期数 {len(index)} 与 net_pnl 长度 {values.size} 不一致"
             )
+        if went_bankrupt(values, capital):
+            frames.append(DataFrame())
+            continue
         frames.append(DataFrame({"net_pnl": values}, index=list(index)))
     return returns_matrix(frames, capital)
+
+
+def went_bankrupt(net_pnl: Sequence[float] | np.ndarray, capital: float) -> bool:
+    """账户在这条净值曲线上是否被打穿过。
+
+    复刻引擎 `calculate_statistics` 的 positive_balance 判据（balance =
+    net_pnl.cumsum() + capital，任一日 ≤ 0 即爆仓），这样"哪些组算爆仓"
+    在引擎和这道闸里是同一个定义。
+    """
+    values = np.asarray(net_pnl, dtype=float)
+    if values.size == 0:
+        return False
+    balance = np.cumsum(values) + capital
+    return bool(np.any(balance <= 0.0))
+
+
+def bankrupt_columns(
+    payloads: Sequence[ReturnsPayload | None],
+    capital: float,
+) -> list[int]:
+    """`payloads` 里被引擎判定爆仓的列下标。
+
+    单独一个函数而不是塞进 `returns_matrix_from_payloads` 的返回值：后者的
+    `(矩阵, 被剔除下标)` 二元组是既有调用方的形状，改成三元组等于为了一条
+    备注去破坏所有下游。剔除仍在矩阵构建里做，这里只负责回答"为什么被剔"。
+    """
+    return [
+        column
+        for column, payload in enumerate(payloads)
+        if payload is not None
+        and len(payload[0]) > 0
+        and went_bankrupt(payload[1], capital)
+    ]
 
 
 def _statistics_of(item: Any) -> dict[str, Any] | None:
@@ -491,8 +559,10 @@ def run_optimization_gates(
             f"逐日收益条数 {len(payloads)} 与结果组数 {n_results} 不一致，PBO 跳过"
         )
     elif results:
+        bankrupt: list[int] = []
         try:
             matrix, dropped = returns_matrix_from_payloads(payloads, capital)
+            bankrupt = bankrupt_columns(payloads, capital)
         except ValueError as exc:
             matrix, dropped = np.zeros((0, 0), dtype=float), []
             notes.append(f"收益矩阵构建失败：{exc}")
@@ -502,6 +572,17 @@ def run_optimization_gates(
             pbo_notes.append(
                 f"{len(dropped)} 组参数逐日收益为空，已剔除（下标 {dropped[:10]}）"
             )
+        if bankrupt:
+            # 留痕而不是静默丢：被剔除的是"引擎判定爆仓"的组，这件事本身
+            # 就是这次寻优的结论之一（杠杆/手数扫过头了），不能只在 PBO
+            # 里消失。
+            bankrupt_note = (
+                f"{len(bankrupt)} 组参数在回测中爆仓（balance ≤ 0），"
+                f"已从 PBO 矩阵剔除（下标 {bankrupt[:10]}）—— "
+                f"其净值曲线穿零后对数收益会翻正，留下会把 PBO 假性压低"
+            )
+            pbo_notes.append(bankrupt_note)
+            notes.append(bankrupt_note)
         if matrix.size == 0:
             notes.append("所有参数组的逐日收益都为空，PBO 无从算起")
         else:

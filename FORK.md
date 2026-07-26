@@ -171,3 +171,58 @@ statistics —— 每组参数的 `daily_df` 在子进程里算完就被丢掉�
 低功效下 PBO 天然向 0.5 靠拢、DSR 天然偏低,此时"不显著"的正确读法是
 **"数据不足以支持从这个网格里挑参数"**,而不是"策略一定是假的"。
 两种情况的处置相同(别用寻优出来的参数),结论不同。
+
+### 4. `load_data` 的时区 / 分块两处取数 bug
+
+**症状(本机 QuestDB,`database.timezone` = UTC,机器在美东)**:同一区间、
+同一份数据,取到的 K 线根数不一样 ——
+
+| 取法 | 边界 | 根数 |
+|---|---|---|
+| 库中实有(`get_bar_overview`) | — | 700 |
+| `database.load_bar_data` 单次 | 裸 datetime | 699 |
+| `BacktestingEngine.load_data` 分块 | 裸 datetime | 693 |
+| 两者 | tz-aware UTC | 700 / 700 |
+
+`load_bar_data('2024-01-26', '2024-01-26 23:59')` 返回 0 根,而那天库里有 bar。
+
+**三个独立病根**:
+
+1. **裸 datetime 被按机器时区解读。** 所有 database driver 的查询边界都过
+   `vnpy.trader.database.convert_tz`,它调 `datetime.astimezone()`;对裸
+   datetime 这个方法把值读成**宿主机**本地时间。于是同一个
+   `datetime(2024,1,26)` 在美西笔记本和港股服务器上是不同的时刻,窗口整体
+   平移一个 UTC 偏移量,边界上的 bar 掉出去。
+2. **分块循环把块与块之间的缝隙跳过了。** 分块查询两端都是闭区间,而循环
+   用 `start = end + interval_delta` 前进 —— 时间戳落在
+   `(end, end + interval_delta)` 开区间里的 bar,两个块都没查。**只要 bar
+   的标签不正好落在块边界上就会丢**,与时区无关(实测 700.SEHK 用
+   tz-aware UTC 边界照丢 7 根)。
+3. **不足一个自然日的窗口 ZeroDivisionError** —— `progress_days / total_days`
+   没有防 `total_days == 0`。
+
+**改动**(三处,均在 fork 侧,未动 `vnpy/`):
+
+- **新增** `vnpy_ctastrategy/query_window.py`:`localize_bound(moment, exchange)`
+  把裸边界读成**交易所自己的墙钟**,时区取自
+  `vnpy_gatewaykit.market_clock.market_tz` —— 这是本项目"交易所 → 时区"的
+  单一真相源,gateway 写入 bar 时用的就是它,两侧因此对齐同一口时钟。
+  market_clock 没映射的交易所(上游 CFFEX/SHFE 等)退回 `DB_TZ`,即配置项
+  `database.timezone`;那仍是**声明出来的**时区,不是宿主机碰巧所在的时区,
+  且在默认安装(`database.timezone` 保持机器时区)下与原行为逐位一致。
+- **改动** `backtesting.py` 模块级 `load_bar_data` / `load_tick_data`:调
+  database 前过 `localize_bound`。放在这一层而不是各调用点,是因为
+  `load_data` 的分块循环、`load_bar` 的预热窗口、`overfitting` 的整段缓存
+  三条路径共用它,一处改完三处都正。
+- **改动** `load_data` 循环:块推进改成 `start = end`(相邻块共享缝隙时刻),
+  靠记住上一块最后一根的时间戳去重,而不是把下一块的起点推过缝隙;
+  `total_days` 加 1 天地板。
+
+**新增依赖** `vnpy_gatewaykit>=0.1.0`(pyproject)。把那张时区表在本包里再抄
+一份会让"2024-01-26 是什么时刻"有两个真相源,正是本改动要消除的那类 bug。
+
+**测试** `tests/test_load_data_timezone.py`(11 条):用内存 database double
+复现,不需要 QuestDB;double 用真的 `convert_tz` 过滤,所以第 1 条病根走的是
+和真 driver 完全相同的代码路径。`TZ` 固定成美西,保证宿主机时区与市场时区
+必然不同 —— 否则断言全部落空。回归前实测 5 red(693 / 699 / 0 / ZeroDivision),
+修复后 11 green。

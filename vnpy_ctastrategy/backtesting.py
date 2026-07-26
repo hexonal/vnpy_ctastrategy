@@ -36,6 +36,7 @@ from .permutation_test import (
     PERMUTATION_SETTING_KEYS,
     attach_permutation_statistics,
 )
+from .query_window import localize_bound
 from .robust_metrics import RobustMetrics, calculate_robust_metrics
 from .sharpe_inference import SharpeInference, sharpe_inference, statistics_fields
 from .base import (
@@ -225,21 +226,30 @@ class BacktestingEngine:
 
         self.history_data.clear()       # Clear previously loaded history data
 
-        # Load 30 days of data each time and allow for progress update
-        total_days: int = (self.end - self.start).days
+        # Load 30 days of data each time and allow for progress update.
+        # total_days is 0 for a window shorter than a calendar day; the floor
+        # keeps the progress fraction below from dividing by zero.
+        total_days: int = max((self.end - self.start).days, 1)
         progress_days: int = max(int(total_days / 10), 1)
         progress_delta: timedelta = timedelta(days=progress_days)
-        interval_delta: timedelta = INTERVAL_DELTA_MAP[self.interval]
 
         start: datetime = self.start
-        end: datetime = self.start + progress_delta
         progress: float = 0
+
+        # Chunk queries are inclusive at both ends, so consecutive chunks share
+        # their seam instant and the bar sitting on it comes back twice. Drop
+        # the repeat by remembering the last timestamp kept. Advancing the next
+        # chunk past the seam instead — start = end + one bar period, as this
+        # loop used to — silently dropped every bar whose timestamp fell inside
+        # the gap, i.e. every bar not labelled exactly on a chunk boundary.
+        last_dt: datetime | None = None
 
         while start < self.end:
             progress_bar: str = "#" * int(progress * 10 + 1)
             self.output(_("加载进度：{} [{:.0%}]").format(progress_bar, progress))
 
-            end = min(end, self.end)  # Make sure end time stays within set range
+            # Make sure end time stays within set range
+            end: datetime = min(start + progress_delta, self.end)
 
             if self.mode == BacktestingMode.BAR:
                 data: list[BarData] | list[TickData] = load_bar_data(
@@ -257,13 +267,19 @@ class BacktestingEngine:
                     end
                 )
 
-            self.history_data.extend(data)
+            fresh: list = [
+                item for item in data
+                if last_dt is None or item.datetime > last_dt
+            ]
+            if fresh:
+                last_dt = fresh[-1].datetime
+
+            self.history_data.extend(fresh)
 
             progress += progress_days / total_days
             progress = min(progress, 1)
 
-            start = end + interval_delta
-            end += progress_delta
+            start = end
 
         self.output(_("历史数据加载完成，数据量：{}").format(len(self.history_data)))
 
@@ -813,8 +829,20 @@ class BacktestingEngine:
                 config=gate_config,
                 source=source,
             )
-            if output:
-                self.output(report.text())
+            # Emitted regardless of `output`. That flag suppresses the
+            # per-parameter dump (one line per grid point, hundreds of them),
+            # which is a volume concern; the gate verdict is a single block
+            # and is the one thing that must not be silently dropped.
+            #
+            # This is what output=False was costing: the GUI backtester
+            # (vnpy_ctabacktester/engine.py:325) passes output=False, and its
+            # result panel renders only the ranked parameter table — it never
+            # reads `.gates`. So the null simulations ran, took their ~18s,
+            # and the verdict went nowhere; the user picked the top row
+            # exactly as if no multiple-comparisons gate existed. The same
+            # engine.py rebinds `engine.output` to its own log pump (line 64),
+            # so self.output is precisely the channel that reaches the GUI.
+            self.output(report.text())
 
         return OptimizationResults(results, gates=report)
 
@@ -1422,10 +1450,23 @@ def load_bar_data(
     start: datetime,
     end: datetime
 ) -> list[BarData]:
-    """"""
+    """Bars in ``[start, end]``, both bounds inclusive.
+
+    A naive bound is read as the exchange's own wall clock, not the host's —
+    see :mod:`vnpy_ctastrategy.query_window`. Localising here rather than in
+    the callers means every entry point into the database (``load_data``'s
+    chunk loop, ``load_bar``'s init window, ``overfitting``'s cached span)
+    gets one reading of a naive bound instead of three.
+    """
     database: BaseDatabase = get_database()
 
-    return database.load_bar_data(symbol, exchange, interval, start, end)
+    return database.load_bar_data(
+        symbol,
+        exchange,
+        interval,
+        localize_bound(start, exchange),
+        localize_bound(end, exchange)
+    )
 
 
 @lru_cache(maxsize=999)
@@ -1435,10 +1476,18 @@ def load_tick_data(
     start: datetime,
     end: datetime
 ) -> list[TickData]:
-    """"""
+    """Ticks in ``[start, end]``, both bounds inclusive.
+
+    Naive bounds are read as the exchange's wall clock, as in load_bar_data.
+    """
     database: BaseDatabase = get_database()
 
-    return database.load_tick_data(symbol, exchange, start, end)
+    return database.load_tick_data(
+        symbol,
+        exchange,
+        localize_bound(start, exchange),
+        localize_bound(end, exchange)
+    )
 
 
 def evaluate(

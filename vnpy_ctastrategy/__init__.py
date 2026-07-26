@@ -30,6 +30,14 @@ from vnpy.trader.utility import BarGenerator, ArrayManager
 
 from .base import APP_NAME, StopOrder
 from .engine import CtaEngine
+from .segments import (
+    Segment,
+    SegmentBudgetExhaustedError,
+    SegmentedRunner,
+    SegmentLeakError,
+    ThreeWaySplit,
+    make_three_way_split,
+)
 from .template import CtaTemplate, CtaSignal, TargetPosTemplate
 
 
@@ -40,6 +48,17 @@ __all__ = [
     "CtaSignal",
     "TargetPosTemplate",
     "StopOrder",
+    # Out-of-sample discipline. Exported because an unimportable gate is a
+    # gate nobody uses: before this, SegmentedRunner had no call site outside
+    # its own tests, so the ordinary `set_parameters(whole range)` +
+    # `run_bf_optimization` path bypassed the TEST-segment protections
+    # entirely — which is the one way they were ever going to be bypassed.
+    "Segment",
+    "SegmentedRunner",
+    "SegmentLeakError",
+    "SegmentBudgetExhaustedError",
+    "ThreeWaySplit",
+    "make_three_way_split",
     "Direction",
     "TickData",
     "BarData",

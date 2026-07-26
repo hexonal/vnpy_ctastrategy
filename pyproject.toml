@@ -22,6 +22,11 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "vnpy>=4.4.0",
+    # query_window reads exchange -> market timezone out of market_clock, the
+    # same table the gateways localize incoming bars with. Duplicating that map
+    # here would give the project two sources of truth for what "2024-01-26"
+    # means, which is the class of bug query_window exists to close.
+    "vnpy_gatewaykit>=0.1.0",
     "pandas",
     "plotly",
 ]
