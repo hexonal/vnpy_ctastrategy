@@ -1,19 +1,9 @@
 from vnpy.event import Event, EventEngine
 from vnpy.trader.engine import MainEngine
 from vnpy.trader.ui import QtCore, QtGui, QtWidgets
-from vnpy.trader.ui.widget import (
-    BaseCell,
-    EnumCell,
-    MsgCell,
-    TimeCell,
-    BaseMonitor
-)
-from ..base import (
-    APP_NAME,
-    EVENT_CTA_LOG,
-    EVENT_CTA_STOPORDER,
-    EVENT_CTA_STRATEGY
-)
+from vnpy.trader.ui.widget import BaseCell, BaseMonitor, EnumCell, MsgCell, TimeCell
+
+from ..base import APP_NAME, EVENT_CTA_LOG, EVENT_CTA_STOPORDER, EVENT_CTA_STRATEGY
 from ..engine import CtaEngine
 from ..locale import _
 from .rollover import RolloverTool
@@ -510,13 +500,8 @@ class SettingEditor(QtWidgets.QDialog):
             edit, type_ = tp
             value_text = edit.text()
 
-            if type_ is bool:
-                if value_text == "True":
-                    value = True
-                else:
-                    value = False
-            else:
-                value = type_(value_text)
+            # bool("False") 是 True，所以布尔项不能走 type_(value_text)
+            value = (value_text == "True") if type_ is bool else type_(value_text)
 
             setting[name] = value
 

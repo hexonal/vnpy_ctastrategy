@@ -57,6 +57,7 @@ from scipy.stats import norm, rankdata
 from vnpy.trader.constant import Exchange, Interval
 from vnpy.trader.object import BarData
 from vnpy.trader.optimize import OptimizationSetting
+from vnpy_gatewaykit.query_window import localize_bound, query_tz
 
 from .backtesting import BacktestingEngine, load_bar_data
 from .base import BacktestingMode
@@ -837,7 +838,12 @@ def sample_size_diagnosis(
 # ══════════════════════════════════════════════════════════════════════
 
 def _naive(moment: datetime) -> datetime:
-    """去掉时区信息。数据库返回 tz-aware、调用方常传裸 datetime，两者不能直接比较。"""
+    """去掉时区信息。
+
+    **只在"两个时刻本来就出自同一个时钟"时才可用**（例如同为调用方手打的裸
+    边界）。跨时钟比较请走 `EngineRunner._instant` —— 剥时区不是"忽略时区"，
+    而是"把对方的时钟当成自己的墙钟读"，这正是窗口整体错位一个交易日的病根。
+    """
     return moment.replace(tzinfo=None) if moment.tzinfo is not None else moment
 
 
@@ -921,12 +927,32 @@ class EngineRunner:
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__.update(state)
 
+    @property
+    def exchange(self) -> Exchange:
+        """标的所属交易所 —— 窗口边界的裸 datetime 按它的墙钟读。"""
+        return Exchange(self.vt_symbol.rsplit(".", 1)[1])
+
+    def _instant(self, moment: datetime) -> datetime:
+        """把一个时刻钉成"哪一个瞬间"，好和别的时刻比较。
+
+        数据库交回的 K 线带 DB_TZ，调用方传进来的窗口边界通常是裸 datetime。
+        裸边界的含义是**交易所墙钟**（`query_window` 那套口径，`load_bar_data`
+        查询时用的也是它），所以这里给它贴上交易所时区，而不是把 K 线那一侧
+        的时区剥掉。两种做法在 `database.timezone` 恰好等于交易所时区时同解；
+        本项目 `database.timezone = UTC` 而港股在 UTC+8，剥时区会把港股
+        2024-01-26 那根读成 2024-01-25，整个窗口后移一个交易日 ——
+        低端丢掉首日、高端吃进 `end` 之后那一根（Walk-Forward 的前视泄漏）。
+
+        已经带时区的时刻原样返回：它本来就指名了一个瞬间。
+        """
+        return localize_bound(moment, self.exchange)
+
     def bars(self) -> list[BarData]:
         """整段历史 K 线（惰性加载，进程内只查一次数据库）。"""
         if self._bars is None:
-            symbol, exchange_str = self.vt_symbol.split(".")
+            symbol = self.vt_symbol.rsplit(".", 1)[0]
             self._bars = load_bar_data(
-                symbol, Exchange(exchange_str), self.interval, self.start, self.end
+                symbol, self.exchange, self.interval, self.start, self.end
             )
         return self._bars
 
@@ -948,9 +974,8 @@ class EngineRunner:
         """把起点向前推 warmup_bars 根真实 K 线（不足则退到样本最开始）。"""
         if self.warmup_bars <= 0:
             return start
-        lo = _naive(start)
-        dts = [b.datetime for b in self.bars()]
-        before = [d for d in dts if _naive(d) < lo]
+        lo = self._instant(start)
+        before = [b.datetime for b in self.bars() if self._instant(b.datetime) < lo]
         if not before:
             return start
         return before[-min(self.warmup_bars, len(before))]
@@ -960,47 +985,66 @@ class EngineRunner:
         engine = self.new_engine(run_start, end)
         engine.add_strategy(self.strategy_class, dict(setting))
 
-        # 数据库返回的是 tz-aware 时间戳，调用方传进来的往往是裸 datetime，
-        # 直接比较会抛 TypeError。统一去掉时区后再比 —— 窗口筛选不依赖时区。
-        lo = _naive(run_start)
+        # K 线时间戳与窗口边界可能出自两个时钟，先钉到瞬间再比（见 _instant）。
+        lo = self._instant(run_start)
         hi = self.window_end(end)
 
         if self.cache_bars:
-            engine.history_data = [b for b in self.bars() if lo <= _naive(b.datetime) <= hi]
+            engine.history_data = [
+                b for b in self.bars() if lo <= self._instant(b.datetime) <= hi
+            ]
         if not engine.history_data:
             engine.load_data()
             # load_data 走的是 engine.end，而 set_parameters 会把它撑到当日
             # 23:59:59。日线下那仍是同一根，日内下就是另一个窗口了 —— 两条
             # 取数路径必须交出同一段，否则 cache_bars 开关会改变绩效。
             engine.history_data = [
-                b for b in engine.history_data if lo <= _naive(b.datetime) <= hi
+                b for b in engine.history_data if lo <= self._instant(b.datetime) <= hi
             ]
         if not engine.history_data:
             return DataFrame()
+
+        # 预热段的剔除锚点：窗口自己第一根 K 线的【日期键】。daily_df 的索引是
+        # `bar.datetime.date()`，即 K 线自己那个时钟的日期；拿调用方墙钟的
+        # `start.date()` 去裁会把窗口首日一起裁掉（港股首日的键是前一日 UTC）。
+        window_lo = self._instant(start)
+        first_in_window = next(
+            (b.datetime for b in engine.history_data if self._instant(b.datetime) >= window_lo),
+            None,
+        )
 
         engine.run_backtesting()
         df = engine.calculate_result()
         if df is None or df.empty:
             return DataFrame()
         df = df.copy()
-        if _naive(run_start) != _naive(start):
+        if lo != window_lo:
             # 预热段只用来把指标和仓位喂热，不计入绩效
-            df = df[[d >= _naive(start).date() for d in df.index]]
+            if first_in_window is None:
+                return DataFrame()
+            cut = first_in_window.date()
+            df = df[[d >= cut for d in df.index]]
         return df
 
     def window_end(self, end: datetime) -> datetime:
         """窗口上界（含）。日线撑到当日收盘，日内按原值取。
 
         日线的 `end` 通常是一个日期（00:00），意思是"含这一天"，所以要撑到
-        23:59:59 才能把当天那根收进来。日内周期下 `end` 是一根真实 K 线的
-        时间戳，再撑到 23:59:59 就会把当天剩下的 K 线一并收进来 ——
-        `ThreeWaySplit` 的相邻两段若落在同一自然日（15m 线下几乎必然），
-        前一段就会吃进后一段的数据，VALID 的绩效里混进 TEST 段。
+        23:59:59 才能把当天那根收进来。**"当天"按交易所墙钟算**：`end` 若是
+        `bar_datetimes()` 交回的真实 K 线时间戳，它带的是 DB_TZ，直接
+        `replace(hour=23)` 撑的是 DB 那个时钟的当天，与查询口径对不上。
+
+        日内周期下 `end` 是一根真实 K 线的时间戳，再撑到 23:59:59 就会把当天
+        剩下的 K 线一并收进来 —— `ThreeWaySplit` 的相邻两段若落在同一自然日
+        （15m 线下几乎必然），前一段就会吃进后一段的数据，VALID 的绩效里混进
+        TEST 段。所以日内一律按原值取。
         """
-        naive = _naive(end)
+        moment = self._instant(end)
         if self.interval in (Interval.MINUTE, Interval.HOUR):
-            return naive
-        return naive.replace(hour=23, minute=59, second=59)
+            return moment
+        return moment.astimezone(query_tz(self.exchange)).replace(
+            hour=23, minute=59, second=59
+        )
 
     def statistics(self, df: DataFrame) -> dict:
         """对任意 daily_df（含拼接出来的样本外曲线）算标准 statistics 面板。
@@ -1649,8 +1693,11 @@ def pbo_from_matrix(
 
     diagnosis = sample_size_diagnosis(
         n_obs=n_obs, n_blocks=n_blocks, annual_days=annual_days,
+        # 不垫地板：`None` 是"数不出来"，`0` 是**数出来的 0**（整个网格一个回合
+        # 都没成交）。把后者垫成 1 等于在一份专治自欺的报告里造一个没发生过的
+        # 回合，而零成交恰恰是这套判据最该喊出来的情形。
         trades_total=(
-            max(1, int(round(avg_round_trips))) if avg_round_trips is not None else None
+            int(round(avg_round_trips)) if avg_round_trips is not None else None
         ),
     )
     if math.isfinite(rho) and rho > 0.95:

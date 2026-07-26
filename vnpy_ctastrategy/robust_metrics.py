@@ -41,7 +41,6 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-
 DEFAULT_TOP_N_DRAWDOWNS: int = 5
 
 

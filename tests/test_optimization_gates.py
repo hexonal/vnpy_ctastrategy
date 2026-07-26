@@ -53,8 +53,8 @@ from vnpy_ctastrategy.optimization_gates import (
     OptimizationResults,
     bankrupt_columns,
     returns_matrix_from_payloads,
-    went_bankrupt,
     run_optimization_gates,
+    went_bankrupt,
 )
 from vnpy_ctastrategy.overfitting import (
     PBONull,

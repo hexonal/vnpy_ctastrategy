@@ -1,12 +1,12 @@
 from vnpy_ctastrategy import (
+    ArrayManager,
+    BarData,
+    BarGenerator,
     CtaTemplate,
+    OrderData,
     StopOrder,
     TickData,
-    BarData,
     TradeData,
-    OrderData,
-    BarGenerator,
-    ArrayManager,
 )
 
 
@@ -99,9 +99,8 @@ class MultiTimeframeStrategy(CtaTemplate):
             if self.ma_trend < 0 or self.rsi_value < 50:
                 self.sell(bar.close_price - 5, abs(self.pos))
 
-        elif self.pos < 0:
-            if self.ma_trend > 0 or self.rsi_value > 50:
-                self.cover(bar.close_price + 5, abs(self.pos))
+        elif self.pos < 0 and (self.ma_trend > 0 or self.rsi_value > 50):
+            self.cover(bar.close_price + 5, abs(self.pos))
 
         self.put_event()
 

@@ -18,7 +18,6 @@ from vnpy_ctastrategy.robust_metrics import (
     regressed_annual_return,
 )
 
-
 CAPITAL = 1_000_000.0
 ANNUAL_DAYS = 247            # 港股口径；美股应传 252
 

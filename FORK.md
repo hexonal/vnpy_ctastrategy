@@ -203,13 +203,16 @@ statistics —— 每组参数的 `daily_df` 在子进程里算完就被丢掉�
 
 **改动**(三处,均在 fork 侧,未动 `vnpy/`):
 
-- **新增** `vnpy_ctastrategy/query_window.py`:`localize_bound(moment, exchange)`
+- **新增** `vnpy_gatewaykit/query_window.py`:`localize_bound(moment, exchange)`
   把裸边界读成**交易所自己的墙钟**,时区取自
   `vnpy_gatewaykit.market_clock.market_tz` —— 这是本项目"交易所 → 时区"的
   单一真相源,gateway 写入 bar 时用的就是它,两侧因此对齐同一口时钟。
   market_clock 没映射的交易所(上游 CFFEX/SHFE 等)退回 `DB_TZ`,即配置项
   `database.timezone`;那仍是**声明出来的**时区,不是宿主机碰巧所在的时区,
   且在默认安装(`database.timezone` 保持机器时区)下与原行为逐位一致。
+  (先落在本包内,后下沉到 gatewaykit:`vnpy_replay` 的回放窗口与 `vnpy_app`
+  的数据管理/复盘图有同一个病,而 gateway 基础设施与 GUI 都不该为了一个时区
+  读法去依赖一个策略应用包。三个包本来就都依赖 gatewaykit。)
 - **改动** `backtesting.py` 模块级 `load_bar_data` / `load_tick_data`:调
   database 前过 `localize_bound`。放在这一层而不是各调用点,是因为
   `load_data` 的分块循环、`load_bar` 的预热窗口、`overfitting` 的整段缓存

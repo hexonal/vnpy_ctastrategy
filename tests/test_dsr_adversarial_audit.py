@@ -24,6 +24,12 @@ import math
 import numpy as np
 import pytest
 
+# 同目录测试模块，pytest prepend 模式下可直接导入
+from test_dsr_turtle_grid import (
+    _grid,
+    turtle_grid_sharpes,
+)
+
 from vnpy_ctastrategy.deflated_sharpe import (
     deflate_optimization,
     expected_max_sharpe,
@@ -38,8 +44,6 @@ from vnpy_ctastrategy.sharpe_inference import (
 from vnpy_ctastrategy.sharpe_inference import (
     sharpe_variance_factor as hac_variance_factor,
 )
-
-from test_dsr_turtle_grid import _grid, turtle_grid_sharpes  # noqa: I001  (同目录测试模块，pytest prepend 模式下可直接导入)
 
 HK_ANNUAL_DAYS = 247
 SAMPLE_DAYS = 600

@@ -25,8 +25,8 @@ from pathlib import Path
 
 from vnpy.trader.app import BaseApp
 from vnpy.trader.constant import Direction
-from vnpy.trader.object import TickData, BarData, TradeData, OrderData
-from vnpy.trader.utility import BarGenerator, ArrayManager
+from vnpy.trader.object import BarData, OrderData, TickData, TradeData
+from vnpy.trader.utility import ArrayManager, BarGenerator
 
 from .base import APP_NAME, StopOrder
 from .engine import CtaEngine
@@ -38,8 +38,7 @@ from .segments import (
     ThreeWaySplit,
     make_three_way_split,
 )
-from .template import CtaTemplate, CtaSignal, TargetPosTemplate
-
+from .template import CtaSignal, CtaTemplate, TargetPosTemplate
 
 __all__ = [
     "APP_NAME",

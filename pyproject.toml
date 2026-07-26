@@ -22,10 +22,13 @@ classifiers = [
 requires-python = ">=3.10"
 dependencies = [
     "vnpy>=4.4.0",
-    # query_window reads exchange -> market timezone out of market_clock, the
-    # same table the gateways localize incoming bars with. Duplicating that map
-    # here would give the project two sources of truth for what "2024-01-26"
-    # means, which is the class of bug query_window exists to close.
+    # Backtest windows are read through gatewaykit's query_window, which reads
+    # exchange -> market timezone out of the same market_clock table the
+    # gateways localize incoming bars with. Duplicating that map here would give
+    # the project two sources of truth for what "2024-01-26" means, which is the
+    # class of bug query_window exists to close — and the replay gateway and the
+    # data-manager GUI need the identical reading, so it lives in the kit all
+    # three already depend on rather than in any one of them.
     "vnpy_gatewaykit>=0.1.0",
     "pandas",
     "plotly",
@@ -69,6 +72,8 @@ select = [
     "B",  # flake8-bugbear
     "E",  # pycodestyle error
     "F",  # pyflakes
+    "I",  # isort
+    "SIM",  # flake8-simplify
     "UP",  # pyupgrade
     "W",  # pycodestyle warning
 ]

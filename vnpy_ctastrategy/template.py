@@ -1,12 +1,12 @@
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from copy import copy
 from typing import Any, cast
-from collections.abc import Callable
 
-from vnpy.trader.constant import Interval, Direction, Offset
-from vnpy.trader.object import BarData, TickData, OrderData, TradeData
+from vnpy.trader.constant import Direction, Interval, Offset
+from vnpy.trader.object import BarData, OrderData, TickData, TradeData
 
-from .base import StopOrder, EngineType
+from .base import EngineType, StopOrder
 
 
 class CtaTemplate(ABC):
@@ -431,10 +431,7 @@ class TargetPosTemplate(CtaTemplate):
 
     def check_order_finished(self) -> bool:
         """"""
-        if self.active_orderids:
-            return False
-        else:
-            return True
+        return not self.active_orderids
 
     def set_target_pos(self, target_pos: int) -> None:
         """"""

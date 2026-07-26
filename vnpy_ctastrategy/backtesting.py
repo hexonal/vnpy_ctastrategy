@@ -1,54 +1,45 @@
-from collections import defaultdict
-from datetime import (
-    date as Date,
-    datetime,
-    timedelta
-)
-from typing import cast, Any, TYPE_CHECKING
-from collections.abc import Callable
-from functools import lru_cache, partial
 import traceback
+from collections import defaultdict
+from collections.abc import Callable
+from datetime import date as Date
+from datetime import datetime, timedelta
+from functools import lru_cache, partial
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+import plotly.graph_objects as go
 from pandas import DataFrame, Series
 from pandas.core.window import ExponentialMovingWindow
-import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from vnpy.trader.constant import (
-    Direction,
-    Offset,
-    Exchange,
-    Interval,
-    Status
-)
-from vnpy.trader.database import get_database, BaseDatabase
-from vnpy.trader.object import OrderData, TradeData, BarData, TickData
-from vnpy.trader.utility import round_to, extract_vt_symbol
+from vnpy.trader.constant import Direction, Exchange, Interval, Offset, Status
+from vnpy.trader.database import BaseDatabase, get_database
+from vnpy.trader.object import BarData, OrderData, TickData, TradeData
 from vnpy.trader.optimize import (
     OptimizationSetting,
     check_optimization_setting,
     run_bf_optimization,
-    run_ga_optimization
+    run_ga_optimization,
 )
+from vnpy.trader.utility import extract_vt_symbol, round_to
+from vnpy_gatewaykit.query_window import localize_bound
 
+from .base import (
+    INTERVAL_DELTA_MAP,
+    STOPORDER_PREFIX,
+    BacktestingMode,
+    EngineType,
+    StopOrder,
+    StopOrderStatus,
+)
+from .locale import _
 from .permutation_test import (
     PERMUTATION_FIELD_DEFAULTS,
     PERMUTATION_SETTING_KEYS,
     attach_permutation_statistics,
 )
-from .query_window import localize_bound
 from .robust_metrics import RobustMetrics, calculate_robust_metrics
 from .sharpe_inference import SharpeInference, sharpe_inference, statistics_fields
-from .base import (
-    BacktestingMode,
-    EngineType,
-    STOPORDER_PREFIX,
-    StopOrder,
-    StopOrderStatus,
-    INTERVAL_DELTA_MAP
-)
 from .template import CtaTemplate
-from .locale import _
 
 if TYPE_CHECKING:                                       # pragma: no cover
     # 运行期只在方法体内 import：optimization_gates → overfitting → backtesting
@@ -1453,7 +1444,7 @@ def load_bar_data(
     """Bars in ``[start, end]``, both bounds inclusive.
 
     A naive bound is read as the exchange's own wall clock, not the host's —
-    see :mod:`vnpy_ctastrategy.query_window`. Localising here rather than in
+    see :mod:`vnpy_gatewaykit.query_window`. Localising here rather than in
     the callers means every entry point into the database (``load_data``'s
     chunk loop, ``load_bar``'s init window, ``overfitting``'s cached span)
     gets one reading of a naive bound instead of three.

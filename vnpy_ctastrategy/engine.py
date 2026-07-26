@@ -1,59 +1,54 @@
 import importlib
 import traceback
 from collections import defaultdict
+from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from copy import copy
+from datetime import datetime, timedelta
+from glob import glob
 from pathlib import Path
 from types import ModuleType
 from typing import Any
-from collections.abc import Callable
-from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
-from copy import copy
-from glob import glob
-from concurrent.futures import Future
 
 from vnpy.event import Event, EventEngine
-from vnpy.trader.engine import BaseEngine, MainEngine, LogEngine
-from vnpy.trader.object import (
-    OrderRequest,
-    SubscribeRequest,
-    HistoryRequest,
-    CancelRequest,
-    LogData,
-    TickData,
-    BarData,
-    OrderData,
-    TradeData,
-    ContractData,
-)
-from vnpy.trader.event import (
-    EVENT_TICK,
-    EVENT_ORDER,
-    EVENT_TRADE
-)
 from vnpy.trader.constant import (
     Direction,
-    OrderType,
-    Interval,
     Exchange,
+    Interval,
     Offset,
-    Status
+    OrderType,
+    Status,
 )
-from vnpy.trader.utility import load_json, save_json, extract_vt_symbol, round_to
-from vnpy.trader.database import BaseDatabase, get_database, DB_TZ
+from vnpy.trader.database import DB_TZ, BaseDatabase, get_database
 from vnpy.trader.datafeed import BaseDatafeed, get_datafeed
+from vnpy.trader.engine import BaseEngine, LogEngine, MainEngine
+from vnpy.trader.event import EVENT_ORDER, EVENT_TICK, EVENT_TRADE
+from vnpy.trader.object import (
+    BarData,
+    CancelRequest,
+    ContractData,
+    HistoryRequest,
+    LogData,
+    OrderData,
+    OrderRequest,
+    SubscribeRequest,
+    TickData,
+    TradeData,
+)
+from vnpy.trader.utility import extract_vt_symbol, load_json, round_to, save_json
 
 from .base import (
     APP_NAME,
     EVENT_CTA_LOG,
-    EVENT_CTA_STRATEGY,
     EVENT_CTA_STOPORDER,
+    EVENT_CTA_STRATEGY,
+    STOPORDER_PREFIX,
     EngineType,
     StopOrder,
     StopOrderStatus,
-    STOPORDER_PREFIX
 )
-from .template import CtaTemplate, TargetPosTemplate
 from .locale import _
+from .template import CtaTemplate, TargetPosTemplate
 
 # 停止单状态映射
 STOP_STATUS_MAP: dict[Status, StopOrderStatus] = {
@@ -237,15 +232,9 @@ class CtaEngine(BaseEngine):
                 # triggered, use limit price if available, otherwise
                 # use ask_price_5 or bid_price_5
                 if stop_order.direction == Direction.LONG:
-                    if tick.limit_up:
-                        price = tick.limit_up
-                    else:
-                        price = tick.ask_price_5
+                    price = tick.limit_up or tick.ask_price_5
                 else:
-                    if tick.limit_down:
-                        price = tick.limit_down
-                    else:
-                        price = tick.bid_price_5
+                    price = tick.limit_down or tick.bid_price_5
 
                 contract: ContractData | None = self.main_engine.get_contract(stop_order.vt_symbol)
                 if not contract:
@@ -887,20 +876,20 @@ class CtaEngine(BaseEngine):
         """
         """
         futures: dict[str, Future] = {}
-        for strategy_name in self.strategies.keys():
+        for strategy_name in self.strategies:
             futures[strategy_name] = self.init_strategy(strategy_name)
         return futures
 
     def start_all_strategies(self) -> None:
         """
         """
-        for strategy_name in self.strategies.keys():
+        for strategy_name in self.strategies:
             self.start_strategy(strategy_name)
 
     def stop_all_strategies(self) -> None:
         """
         """
-        for strategy_name in self.strategies.keys():
+        for strategy_name in self.strategies:
             self.stop_strategy(strategy_name)
 
     def load_strategy_setting(self) -> None:

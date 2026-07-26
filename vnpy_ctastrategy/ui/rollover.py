@@ -1,18 +1,24 @@
+from copy import copy
 from datetime import datetime
 from time import sleep
 from typing import TYPE_CHECKING
-from copy import copy
 
-from vnpy.trader.engine import MainEngine
 from vnpy.trader.constant import OrderType
-from vnpy.trader.object import ContractData, OrderRequest, SubscribeRequest, TickData
-from vnpy.trader.object import Direction, Offset
-from vnpy.trader.ui import QtWidgets
 from vnpy.trader.converter import OffsetConverter, PositionHolding
+from vnpy.trader.engine import MainEngine
+from vnpy.trader.object import (
+    ContractData,
+    Direction,
+    Offset,
+    OrderRequest,
+    SubscribeRequest,
+    TickData,
+)
+from vnpy.trader.ui import QtWidgets
 
-from ..engine import CtaEngine, APP_NAME
-from ..template import CtaTemplate
+from ..engine import APP_NAME, CtaEngine
 from ..locale import _
+from ..template import CtaTemplate
 
 if TYPE_CHECKING:
     from .widget import CtaManager

@@ -2,12 +2,12 @@ from collections.abc import Callable
 from time import time
 
 from vnpy_ctastrategy import (
+    BarData,
     CtaTemplate,
+    OrderData,
     StopOrder,
     TickData,
-    BarData,
     TradeData,
-    OrderData
 )
 
 

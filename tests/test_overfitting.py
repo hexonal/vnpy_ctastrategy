@@ -27,6 +27,7 @@ from vnpy_ctastrategy.overfitting import (
     PBOResult,
     annualised_sharpe,
     argmax_selector,
+    assess_significance,
     average_config_correlation,
     cscv_pbo,
     cscv_pbo_stability,
@@ -42,9 +43,7 @@ from vnpy_ctastrategy.overfitting import (
     sample_size_diagnosis,
     sharpe_standard_error,
     stitch_daily_frames,
-    assess_significance,
 )
-
 
 ANNUAL_DAYS = 252
 CAPITAL = 1_000_000.0

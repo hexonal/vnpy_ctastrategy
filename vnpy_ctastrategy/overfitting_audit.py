@@ -79,6 +79,8 @@ from typing import Any
 
 import numpy as np
 from pandas import DataFrame
+from vnpy.trader.constant import Exchange
+from vnpy_gatewaykit.query_window import localize_bound, query_tz
 
 from .overfitting import (
     EngineRunner,
@@ -489,7 +491,10 @@ def run_audit(
     if capital is None:
         capital = float(runner.capital)
 
-    dts = [d for d in runner.bar_datetimes() if _within(d, start, end)]
+    # 裸边界按交易所墙钟读，与 runner 取数时是同一套口径（见 _within）。
+    # 假 runner 没有 exchange，退回剥时区的旧口径 —— 它那两侧本来就同钟。
+    exchange = runner.exchange if isinstance(runner, EngineRunner) else None
+    dts = [d for d in runner.bar_datetimes() if _within(d, start, end, exchange)]
     if len(dts) < train_bars + test_bars:
         raise ValueError(
             f"区间内仅 {len(dts)} 根 K 线，切不出 train={train_bars}+test={test_bars} 的一折"
@@ -647,12 +652,37 @@ def run_audit(
     )
 
 
-def _within(moment: datetime, start: datetime, end: datetime) -> bool:
-    """区间判定，先剥掉时区 —— 数据库返回 tz-aware，调用方通常传裸 datetime。"""
-    naive = moment.replace(tzinfo=None) if moment.tzinfo is not None else moment
-    lo = start.replace(tzinfo=None) if start.tzinfo is not None else start
-    hi = end.replace(tzinfo=None) if end.tzinfo is not None else end
-    return lo <= naive <= hi.replace(hour=23, minute=59, second=59)
+def _within(
+    moment: datetime,
+    start: datetime,
+    end: datetime,
+    exchange: Exchange | None = None,
+) -> bool:
+    """`moment` 是否落在 [start, end 当日收盘] 内。
+
+    数据库交回的 K 线时间戳带 DB_TZ，调用方的 `start` / `end` 通常是裸
+    datetime，两者出自不同时钟。给了 `exchange` 就按 `query_window` 那套口径
+    （裸边界 = 交易所墙钟，与 `load_bar_data` 查询时用的同一套）把两侧钉到
+    瞬间再比；"end 当日收盘"也在交易所墙钟上算。
+
+    剥时区直接比不是"忽略时区"，是把 DB 的时间戳当交易所墙钟读：本项目
+    `database.timezone = UTC` 而港股在 UTC+8，港股 2024-01-26 那根存成
+    2024-01-25 16:00Z，于是审查区间整体后移一个交易日 —— 低端漏掉自己的第一个
+    交易日，高端把 `end` 之后那一根收进来。Walk-Forward 的每一折边界都从这份
+    清单上切，错位会一路传下去。
+
+    `exchange=None` 退回剥时区的旧口径：K 线与边界同钟（例如测试用的假
+    runner，两侧都是裸 datetime）时它是对的，而那时也拿不到交易所。
+    """
+    if exchange is None:
+        low = start.replace(tzinfo=None) if start.tzinfo is not None else start
+        high = end.replace(tzinfo=None) if end.tzinfo is not None else end
+        instant = moment.replace(tzinfo=None) if moment.tzinfo is not None else moment
+    else:
+        low = localize_bound(start, exchange)
+        high = localize_bound(end, exchange).astimezone(query_tz(exchange))
+        instant = localize_bound(moment, exchange)
+    return low <= instant <= high.replace(hour=23, minute=59, second=59)
 
 
 # ══════════════════════════════════════════════════════════════════════

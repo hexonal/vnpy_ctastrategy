@@ -3,10 +3,11 @@ Defines constants and objects used in CtaStrategy App.
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
 from datetime import datetime, timedelta
+from enum import Enum
 
-from vnpy.trader.constant import Direction, Offset, Interval
+from vnpy.trader.constant import Direction, Interval, Offset
+
 from .locale import _
 
 APP_NAME = "CtaStrategy"

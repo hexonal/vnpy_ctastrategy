@@ -1,13 +1,13 @@
 from vnpy_ctastrategy import (
-    StopOrder,
-    TickData,
-    BarData,
-    TradeData,
-    OrderData,
-    BarGenerator,
     ArrayManager,
+    BarData,
+    BarGenerator,
     CtaSignal,
-    TargetPosTemplate
+    OrderData,
+    StopOrder,
+    TargetPosTemplate,
+    TickData,
+    TradeData,
 )
 
 

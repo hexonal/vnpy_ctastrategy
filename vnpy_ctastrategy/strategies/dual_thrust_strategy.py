@@ -1,13 +1,14 @@
 from datetime import time
+
 from vnpy_ctastrategy import (
+    ArrayManager,
+    BarData,
+    BarGenerator,
     CtaTemplate,
+    OrderData,
     StopOrder,
     TickData,
-    BarData,
     TradeData,
-    OrderData,
-    BarGenerator,
-    ArrayManager,
 )
 
 

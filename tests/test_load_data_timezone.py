@@ -42,10 +42,10 @@ import pytest
 from vnpy.trader.constant import Exchange, Interval
 from vnpy.trader.database import DB_TZ, convert_tz
 from vnpy.trader.object import BarData
+from vnpy_gatewaykit.query_window import localize_bound, query_tz
 
 from vnpy_ctastrategy import backtesting as backtesting_module
 from vnpy_ctastrategy.backtesting import BacktestingEngine, load_bar_data
-from vnpy_ctastrategy.query_window import localize_bound, query_tz
 
 HK_TZ = ZoneInfo("Asia/Hong_Kong")
 SYMBOL = "TZBUG"

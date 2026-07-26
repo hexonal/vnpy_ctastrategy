@@ -35,7 +35,6 @@ from vnpy_ctastrategy.sharpe_inference import (
     stationary_bootstrap_indices,
 )
 
-
 ANNUAL_DAYS = 247            # 港股口径；美股应传 252
 PROJECT_N = 611              # 700.SEHK 2024-01~2026-07 的实测样本长度
 DAILY_VOL = 0.012            # 日波动 1.2%，接近港美股单标的 CTA 的实际量级

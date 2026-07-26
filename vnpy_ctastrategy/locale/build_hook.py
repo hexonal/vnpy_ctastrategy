@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from babel.messages.mofile import write_mo
 from babel.messages.pofile import read_po
+from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 
 class LocaleBuildHook(BuildHookInterface):
@@ -18,6 +18,8 @@ class LocaleBuildHook(BuildHookInterface):
         self.mo_path: Path = self.locale_path.joinpath("en", "LC_MESSAGES", "vnpy_ctastrategy.mo")
         self.po_path: Path = self.locale_path.joinpath("en", "LC_MESSAGES", "vnpy_ctastrategy.po")
 
-        with open(self.mo_path, "wb") as mo_f:
-            with open(self.po_path, encoding="utf-8") as po_f:
-                write_mo(mo_f, read_po(po_f))
+        with (
+            open(self.mo_path, "wb") as mo_f,
+            open(self.po_path, encoding="utf-8") as po_f,
+        ):
+            write_mo(mo_f, read_po(po_f))
