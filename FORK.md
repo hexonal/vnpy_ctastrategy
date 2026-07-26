@@ -52,3 +52,122 @@
   但两者分子口径不同(RAR 年化 vs 总收益),**不可直接比大小**。
 
 三者都是样本内描述统计,**不是统计检验**,不回答"这是不是运气"。
+
+### 2. 样本内外三段切分 TRAIN / VALID / TEST
+
+对齐 vnpy.alpha 与官方投研系列第 3、4 篇（AlphaDataset 构造即划分三段、
+`AlphaModel.predict(dataset, segment)` 强制显式传段）。
+
+- **新增** `vnpy_ctastrategy/segments.py`(独立文件)
+- **`backtesting.py` 零修改** —— 三段能力全部长在新文件里。
+  引擎本身没有插入点(`set_parameters` 只有单段 start/end、`run_backtesting`
+  是单趟回放),切分只可能发生在"喂什么起止"这一层,
+  这正是 `overfitting.EngineRunner` 已经在做的事,本模块沿用同一形态。
+- **新增** `tests/test_segment_split.py`(46 例)
+
+补的缺口:`robust_metrics` / `overfitting` / `deflated_sharpe` 三套统计闸
+**都不知道自己算的是哪一段** —— 样本内的 `sharpe_significant=True`
+与样本外的长得一模一样。
+
+四件东西:
+
+1. `Segment` / `ThreeWaySplit` / `make_three_way_split` / `split_by_ratio`
+   —— 边界取自真实 K 线时间戳,`__post_init__` 强制
+   `train_end < valid_start` 且 `valid_end < test_start`(三段不共享任何一根 K 线)。
+2. `SegmentedRunner` —— 包住 `BacktestRunner`,按段取数;
+   每段的 statistics 注入 `segment` 与 `is_out_of_sample` 两个键,
+   daily_df 打 `attrs["segment"]`。
+3. `run_holdout` —— TRAIN 扫网格选参 → VALID 复核(样本内)→ TEST 只跑一次;
+   TEST 段附 block-bootstrap 显著性。
+4. `SegmentGuardedEngine` —— `BacktestingEngine` 子类,
+   `use_segment(segment, ...)` 让窗口由切分决定(消灭"改了段忘了改日期"),
+   两个寻优入口在窗口与 TEST 段有交集时抛 `SegmentLeakError`。
+   两个覆写是纯 `*args/**kwargs` 透传,不抄父类签名 ——
+   否则父类新增的 `gates` / `collect_returns` 会被静默挡在门外。
+
+**VALID 归样本内**(官方原文:"只要我们根据验证集表现调整因子、调参数、
+选择训练轮数或更换模型,它就已经参与了研究决策")。
+`is_out_of_sample()` 只对 TEST 返回 True。
+
+三道闸(都是 exit 码,不是注释):
+- 在 TEST 上扫参数 → `SegmentLeakError`(`SegmentedRunner.scan` 与
+  `SegmentGuardedEngine` 两条路都堵)
+- 第二次查看 TEST → `SegmentBudgetExhaustedError`,每次查看进 `test_audit`;
+  重开必须 `reset_test_budget(reason=...)`,reason 为空被拒
+- 取某段结果的 API,`segment` 一律无默认值(抄官方 `predict(dataset, segment)`)
+
+实测(700.SEHK 734 日线、DoubleMaStrategy 6 组网格、420/140/140 切分):
+TRAIN sharpe 0.5006 / VALID 0.5963 / **TEST −0.2495**(p_block=0.85 不显著)。
+样本内两段都是正的,样本外翻负 —— 这正是本层要让人看见的东西。
+
+**诚实边界**:一次性 holdout 不能替代 Walk-Forward。它只有一段样本外、
+一个参数集,回答不了"参数是否随时间漂移"。它便宜(1×网格+2 次回测),
+便宜的用途是"别因为太贵就干脆不看样本外",不是 WF 的替代品。
+
+### 3. 参数寻优的多重比较闸 DSR + PBO
+
+补的缺口:单次回测已经有 t 检验(`sharpe_inference`)与分块重排
+(`permutation_test`),但**一旦开始扫参数就裸奔** —— 而扫参数正是多重比较发生的
+地方。25 组参数取最好的一组,等于做了 25 次检验只报最显著的那次;
+它的 t 值、p 值、Sharpe 全部被选择偏差污染。
+
+- **新增** `vnpy_ctastrategy/optimization_gates.py`(独立文件,闸的全部逻辑在这)
+- **新增** `tests/test_optimization_gates.py`(25 例,含负对照/正对照对拍)
+- **改动** `backtesting.py`:四处
+  1. `evaluate()` 尾部加 4 个带默认值的参数(`risk_free` / `annual_days` /
+     `half_life` / `collect_returns`),`wrap_evaluate()` 以**关键字**传入
+     (partial 是位置绑定,加在 `setting` 之后 + 关键字传 = 位置错位不可能发生);
+  2. `run_bf_optimization` / `run_ga_optimization` 加 3 个带默认值的关键字参数
+     (`gates` / `gate_config` / `collect_returns`);
+  3. 新增私有方法 `_finish_optimization()`,把两个入口的收尾逻辑合并;
+  4. `TYPE_CHECKING` 块(闸模块 → overfitting → backtesting 是真实导入环,
+     运行期 import 只能放在方法体内)。
+- **改动** `overfitting.py`:抽出 `pbo_from_matrix()`,`pbo_from_settings()`
+  改为委托给它(行为逐字不变,由 `test_pbo_from_matrix_matches_pbo_from_settings`
+  钉住)。新入口让"已有收益矩阵"的场景不必重跑网格。
+
+**返回值向后兼容是硬要求**:`OptimizationResults` 是 `list` 子类,
+元素仍是按目标值降序的 `(setting, target, statistics)` 三元组,
+`len` / 下标 / 解包 / 迭代 / `get_target_value` / `deflate_optimization` 全部不变;
+两道闸的结果挂在**新增属性** `.gates` 上。逐日收益(`collect_returns=True` 时
+`evaluate` 多返回的第 4 个元素)在 `_finish_optimization` 里就被剥掉,
+不进返回值的元组。
+
+顺带修掉的一个真 bug:`wrap_evaluate` 原先丢掉 `annual_days` / `risk_free` /
+`half_life`,子进程一律用 `BacktestingEngine` 的默认值(240 / 0 / 120)。
+港股设 247 时,寻优排出来的 sharpe 是 0.759290881(按 240 算),
+而单跑 247 是 0.770284289 —— 整个排名、DSR 的年化折算、`ewm_sharpe`
+都建在错的年化基数上。现已透传,`test_wrap_evaluate_forwards_engine_annual_days`
+钉住。
+
+PBO 的数据来源:寻优流程自己产出。CSCV 需要 (T, N) 收益矩阵,而寻优只返回标量
+statistics —— 每组参数的 `daily_df` 在子进程里算完就被丢掉。`overfitting_audit`
+绕过这一点的办法是用 `EngineRunner` 把网格**重跑一遍**,那是一条与寻优平行的
+代码路径(分块查询 vs 单次查询,取到的 K 线根数都可能不同)。这里改为让
+`evaluate` 把已经算出来的逐日盈亏带回来(约 14 KiB/组),PBO 因此测的是
+**寻优当时那一批回测**。
+
+判据(两道闸都是否决工具,不是背书工具):
+- `report.dsr_value` 取 headline 与详版的**较小者**(详版用真实 γ₃/γ₄,
+  真实收益多为负偏厚尾,正态假设会高估显著性,拿不准就用低的那个)
+- 任一闸算不出来 = `passed` 为 False。**缺证据不是证据** ——
+  非夏普族目标 / 头名爆仓 / 未收集逐日收益,一律记 None + 备注,绝不默认放行
+- GA 的 DSR 系统性偏乐观(收敛截尾 → 试验 std 偏小 → SR* 偏低),
+  闸无法自动修正,强制写进 `notes`
+
+实测(700.SEHK 2023-07~2026-07 共 729 日、DoubleMaStrategy 25 组网格、
+`annual_days=247`、真多进程):
+
+    最优参数 fast=10 / slow=30,年化 Sharpe 0.770
+    PSR(0) = 0.902   ← 只看这一条曲线,"显著"
+    DSR    = 0.511   ← 扣掉"试了 25 组",不显著(SR* = 0.75,几乎等于观测值)
+    PBO    = 0.653   ← 高于零分布中位 0.474,p = 0.822;选参【反向有害】
+
+也就是说:这个网格挑出来的参数,样本内看着能打,实际上整条"挑参数"的流程
+不携带任何信息。这正是本层要拦下的东西。
+
+**诚实边界**:本项目的典型样本(单标的 600-730 日线、十几到几十笔完整交易)
+处于低功效区 —— 上面那份报告自己就写着"能以 80% 功效检出的最小真实 Sharpe ≈ 2.32"。
+低功效下 PBO 天然向 0.5 靠拢、DSR 天然偏低,此时"不显著"的正确读法是
+**"数据不足以支持从这个网格里挑参数"**,而不是"策略一定是假的"。
+两种情况的处置相同(别用寻优出来的参数),结论不同。

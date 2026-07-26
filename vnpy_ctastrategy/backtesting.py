@@ -4,7 +4,7 @@ from datetime import (
     datetime,
     timedelta
 )
-from typing import cast, Any
+from typing import cast, Any, TYPE_CHECKING
 from collections.abc import Callable
 from functools import lru_cache, partial
 import traceback
@@ -48,6 +48,15 @@ from .base import (
 )
 from .template import CtaTemplate
 from .locale import _
+
+if TYPE_CHECKING:                                       # pragma: no cover
+    # 运行期只在方法体内 import：optimization_gates → overfitting → backtesting
+    # 是一条真实的导入环，模块级 import 会在解释器加载 backtesting 时炸掉。
+    from .optimization_gates import (
+        OptimizationGateConfig,
+        OptimizationResults,
+        ReturnsPayload,
+    )
 
 
 class BacktestingEngine:
@@ -757,18 +766,87 @@ class BacktestingEngine:
         fig.update_layout(height=1000, width=1000)
         return fig
 
+    def _finish_optimization(
+        self,
+        raw_results: list,
+        target_name: str,
+        output: bool,
+        gates: bool,
+        gate_config: "OptimizationGateConfig | None",
+        collect_returns: bool,
+        source: str,
+    ) -> "OptimizationResults":
+        """寻优收尾：拆掉逐日收益、打印、跑 DSR/PBO 闸。
+
+        返回 `OptimizationResults` —— 一个 list 子类，元素仍是原来的
+        `(setting, target, statistics)` 三元组。逐日收益（`collect_returns=True`
+        时 evaluate 多返回的第 4 个元素）在这里被剥掉、转成 (T, N) 矩阵喂给 PBO，
+        **不进返回值的元组**，这样既有调用方（UI / get_target_value /
+        deflate_optimization / `for setting, target, stats in results`）逐字不变。
+        """
+        # 运行期延迟 import：optimization_gates 依赖 overfitting，overfitting 依赖本模块
+        from .optimization_gates import OptimizationResults, run_optimization_gates
+
+        # 局部变量注解不在运行期求值（PEP 526），所以这里可以直接用
+        # TYPE_CHECKING 下才存在的名字；方法签名里的注解必须继续加引号。
+        payloads: list[ReturnsPayload | None] | None = None
+        if collect_returns:
+            payloads = [
+                row[3] if len(row) >= 4 else None
+                for row in raw_results
+            ]
+        results: list = [tuple(row[:3]) for row in raw_results]
+
+        if output:
+            for result in results:
+                msg: str = _("参数：{}, 目标：{}").format(result[0], result[1])
+                self.output(msg)
+
+        report = None
+        if gates and results:
+            report = run_optimization_gates(
+                results,
+                target_name=target_name,
+                annual_days=self.annual_days,
+                capital=self.capital,
+                payloads=payloads,
+                config=gate_config,
+                source=source,
+            )
+            if output:
+                self.output(report.text())
+
+        return OptimizationResults(results, gates=report)
+
     def run_bf_optimization(
         self,
         optimization_setting: OptimizationSetting,
         output: bool = True,
-        max_workers: int | None = None
-    ) -> list:
-        """"""
-        if not check_optimization_setting(optimization_setting):
-            return []
+        max_workers: int | None = None,
+        gates: bool = True,
+        gate_config: "OptimizationGateConfig | None" = None,
+        collect_returns: bool = True,
+    ) -> "OptimizationResults":
+        """穷举寻优。返回值是 list 子类，元素仍是 (setting, target, statistics)。
 
-        evaluate_func: Callable = wrap_evaluate(self, optimization_setting.target_name)
-        results: list = run_bf_optimization(
+        gates           跑完后自动算 DSR 与 PBO，挂在返回值的 `.gates` 上。
+                        扫参数是多重比较真正发生的地方，单次回测的 t 检验与分块
+                        重排在这里全部失效，所以默认开。关掉只在"我确实只想要
+                        参数表"时才合理。零分布模拟约 0.09 秒 × n_null_sims，
+                        嫌慢就传 `gate_config=OptimizationGateConfig(n_null_sims=0)`，
+                        而不是把整道闸关掉。
+        collect_returns 让每个子进程把已经算出来的逐日盈亏带回来（约 14 KiB/组）。
+                        **这是 PBO 的唯一数据来源** —— 关掉则 PBO 无法计算，
+                        报告里会如实写"未收集"，不做任何替代估计。
+        """
+        if not check_optimization_setting(optimization_setting):
+            from .optimization_gates import OptimizationResults
+            return OptimizationResults()
+
+        evaluate_func: Callable = wrap_evaluate(
+            self, optimization_setting.target_name, collect_returns=collect_returns
+        )
+        raw_results: list = run_bf_optimization(
             evaluate_func,
             optimization_setting,
             get_target_value,
@@ -776,12 +854,15 @@ class BacktestingEngine:
             output=self.output
         )
 
-        if output:
-            for result in results:
-                msg: str = _("参数：{}, 目标：{}").format(result[0], result[1])
-                self.output(msg)
-
-        return results
+        return self._finish_optimization(
+            raw_results,
+            target_name=optimization_setting.target_name,
+            output=output,
+            gates=gates,
+            gate_config=gate_config,
+            collect_returns=collect_returns,
+            source="bf",
+        )
 
     run_optimization = run_bf_optimization
 
@@ -796,14 +877,26 @@ class BacktestingEngine:
         lambda_: int | None = None,
         cxpb: float = 0.95,
         mutpb: float | None = None,
-        indpb: float = 1.0
-    ) -> list:
-        """"""
-        if not check_optimization_setting(optimization_setting):
-            return []
+        indpb: float = 1.0,
+        gates: bool = True,
+        gate_config: "OptimizationGateConfig | None" = None,
+        collect_returns: bool = True,
+    ) -> "OptimizationResults":
+        """遗传寻优。参数与返回值语义同 `run_bf_optimization`。
 
-        evaluate_func: Callable = wrap_evaluate(self, optimization_setting.target_name)
-        results: list = run_ga_optimization(
+        ⚠️ GA 的 DSR 系统性偏乐观：遗传搜索向高适应度收敛，缓存里的试验夏普被
+        截尾，试验间 std 偏小 → 零技能最大夏普期望 SR* 偏低 → DSR 偏高。
+        闸会把这条写进 `report.notes`，但它无法自动修正 —— 要拿 GA 的 DSR 当
+        验收闸，必须另用穷举在同一参数空间采样估 std。
+        """
+        if not check_optimization_setting(optimization_setting):
+            from .optimization_gates import OptimizationResults
+            return OptimizationResults()
+
+        evaluate_func: Callable = wrap_evaluate(
+            self, optimization_setting.target_name, collect_returns=collect_returns
+        )
+        raw_results: list = run_ga_optimization(
             evaluate_func,
             optimization_setting,
             get_target_value,
@@ -818,12 +911,15 @@ class BacktestingEngine:
             output=self.output
         )
 
-        if output:
-            for result in results:
-                msg: str = _("参数：{}, 目标：{}").format(result[0], result[1])
-                self.output(msg)
-
-        return results
+        return self._finish_optimization(
+            raw_results,
+            target_name=optimization_setting.target_name,
+            output=output,
+            gates=gates,
+            gate_config=gate_config,
+            collect_returns=collect_returns,
+            source="ga",
+        )
 
     def update_daily_close(self, price: float) -> None:
         """"""
@@ -1358,10 +1454,30 @@ def evaluate(
     capital: int,
     end: datetime,
     mode: BacktestingMode,
-    setting: dict
+    setting: dict,
+    risk_free: float = 0,
+    annual_days: int = 240,
+    half_life: int = 120,
+    collect_returns: bool = False
 ) -> tuple:
     """
     Function for running in multiprocessing.pool
+
+    The four trailing parameters are keyword-only in practice: wrap_evaluate
+    binds everything up to `mode` positionally, the optimizer appends `setting`,
+    and these arrive as keywords. Adding them at the tail (rather than before
+    `setting`) keeps that positional binding impossible to get wrong.
+
+    risk_free / annual_days / half_life used to be dropped on the floor here:
+    the child process always fell back to BacktestingEngine's defaults
+    (0 / 240 / 120) no matter what the parent engine was configured with, so an
+    HK grid search set to 247 trading days was silently ranked on 240. They are
+    forwarded now, defaulting to exactly those old fallbacks.
+
+    collect_returns adds a 4th element to the returned tuple: the per-day mark
+    -to-market series `(dates, net_pnl)` that calculate_result() computes and
+    that this function used to throw away. It is the only way to get the (T, N)
+    return matrix CSCV/PBO needs, and it costs ~14 KiB per parameter set.
     """
     engine: BacktestingEngine = BacktestingEngine()
 
@@ -1375,20 +1491,34 @@ def evaluate(
         pricetick=pricetick,
         capital=capital,
         end=end,
-        mode=mode
+        mode=mode,
+        risk_free=risk_free,
+        annual_days=annual_days,
+        half_life=half_life
     )
 
     engine.add_strategy(strategy_class, setting)
     engine.load_data()
     engine.run_backtesting()
-    engine.calculate_result()
+    df: DataFrame = engine.calculate_result()
     statistics: dict = engine.calculate_statistics(output=False)
 
     target_value: float = statistics.get(target_name, 0)
-    return (setting, target_value, statistics)
+    if not collect_returns:
+        return (setting, target_value, statistics)
+
+    if df is None or df.empty or "net_pnl" not in df.columns:
+        payload: tuple = ([], np.zeros(0, dtype=float))
+    else:
+        payload = (list(df.index), df["net_pnl"].to_numpy(dtype=float))
+    return (setting, target_value, statistics, payload)
 
 
-def wrap_evaluate(engine: BacktestingEngine, target_name: str) -> Callable:
+def wrap_evaluate(
+    engine: BacktestingEngine,
+    target_name: str,
+    collect_returns: bool = False
+) -> Callable:
     """
     Wrap evaluate function with given setting from backtesting engine.
     """
@@ -1405,7 +1535,11 @@ def wrap_evaluate(engine: BacktestingEngine, target_name: str) -> Callable:
         engine.pricetick,
         engine.capital,
         engine.end,
-        engine.mode
+        engine.mode,
+        risk_free=engine.risk_free,
+        annual_days=engine.annual_days,
+        half_life=engine.half_life,
+        collect_returns=collect_returns
     )
     return func
 

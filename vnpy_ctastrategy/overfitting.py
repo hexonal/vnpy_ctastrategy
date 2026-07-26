@@ -1531,27 +1531,7 @@ def pbo_from_settings(
     if matrix.size == 0:
         raise ValueError("所有参数组回测均为空，无法计算 PBO")
 
-    n_obs, n_cols = matrix.shape
-    if n_blocks is None:
-        n_blocks, block_notes = recommend_n_blocks(n_obs, min_block_obs=min_block_obs)
-        notes.extend(block_notes)
-    if n_blocks < 2:
-        raise ValueError(f"样本 {n_obs} 期不足以做 CSCV")
-
-    results, summary = cscv_pbo_stability(
-        matrix, n_blocks=n_blocks, annual_days=annual_days, n_offsets=n_offsets
-    )
-    representative = min(results, key=lambda r: abs(r.pbo - summary["pbo_median"]))
-    rho = average_config_correlation(matrix)
-
-    null: PBONull | None = None
-    if n_null_sims > 0:
-        null = pbo_null_distribution(
-            n_obs=representative.n_obs_used, n_configs=n_cols, n_blocks=n_blocks,
-            annual_days=annual_days, correlation=0.0 if not math.isfinite(rho) else max(rho, 0.0),
-            n_sims=n_null_sims, seed=seed,
-        )
-
+    extra_notes: list[str] = []
     non_empty = [f for f in frames if f is not None and not f.empty]
     if round_trip_counter is not None:
         # 精确路径：由调用方按仓位序列数完整回合（金字塔加仓不会被数成多个回合）
@@ -1565,22 +1545,101 @@ def pbo_from_settings(
             sum(float(f["trade_count"].sum()) for f in non_empty) / len(non_empty) / 2.0
             if non_empty else 0.0
         )
-        notes.append(
+        extra_notes.append(
             "回合数按 trade_count/2 估算（未传 round_trip_counter）："
             "金字塔加仓策略会被高估，样本诊断偏宽松"
         )
+
+    return pbo_from_matrix(
+        matrix,
+        annual_days=annual_days,
+        n_blocks=n_blocks,
+        min_block_obs=min_block_obs,
+        n_offsets=n_offsets,
+        n_null_sims=n_null_sims,
+        seed=seed,
+        avg_round_trips=avg_round_trips,
+        notes=notes,
+        extra_notes=extra_notes,
+    )
+
+
+def pbo_from_matrix(
+    matrix: np.ndarray,
+    annual_days: int = 252,
+    n_blocks: int | None = None,
+    min_block_obs: int = 20,
+    n_offsets: int = 8,
+    n_null_sims: int = 200,
+    seed: int = 20260725,
+    avg_round_trips: float | None = None,
+    notes: Sequence[str] | None = None,
+    extra_notes: Sequence[str] | None = None,
+) -> PBOStudy:
+    """已有 (T, N) 收益矩阵时的 PBO 研究入口 —— 不重跑任何回测。
+
+    `pbo_from_settings` 是"先跑网格再算"，本函数是"矩阵已经有了再算"。参数寻优
+    （`BacktestingEngine.run_bf_optimization`）本身就把每组参数在全样本上跑了一遍，
+    收益矩阵是那趟回放的副产品；再走 `pbo_from_settings` 等于把整个网格重跑第二遍，
+    而且用的是另一条取数路径（`EngineRunner` 单次查询 vs 寻优子进程的分块查询），
+    两条路径的 K 线根数实测不一致。所以寻优后的 PBO 必须吃寻优自己产出的矩阵。
+
+    matrix          (T, N)，第 n 列是第 n 组参数的逐期【对数收益】（口径见
+                    `daily_log_returns`）。列的顺序由调用方负责与参数组对齐。
+    avg_round_trips 每组参数的平均完整回合数，喂给 `sample_size_diagnosis`。
+                    传 None 表示"数不出来"，样本诊断里的交易笔数一栏留空
+                    —— 比塞一个猜出来的数诚实。
+    notes           先于块数建议插入的备注（例如"某几组回测为空已剔除"）。
+    extra_notes     紧跟在块数建议之后插入的备注（例如回合数的口径退化说明）。
+                    两个参数分开是为了让最终备注顺序与 `pbo_from_settings` 一致。
+
+    `n_null_sims=0` 可跳过零分布模拟（约 0.09 秒/次 × n_sims），但那样只能拿到
+    未校准的固定阈值判据，不推荐。
+    """
+    m = np.asarray(matrix, dtype=float)
+    if m.ndim != 2:
+        raise ValueError(f"matrix 必须是二维 (T, N)，收到 shape={m.shape}")
+    if m.size == 0:
+        raise ValueError("收益矩阵为空，无法计算 PBO")
+
+    out_notes: list[str] = list(notes) if notes else []
+    n_obs, n_cols = m.shape
+    if n_blocks is None:
+        n_blocks, block_notes = recommend_n_blocks(n_obs, min_block_obs=min_block_obs)
+        out_notes.extend(block_notes)
+    if n_blocks < 2:
+        raise ValueError(f"样本 {n_obs} 期不足以做 CSCV")
+    if extra_notes:
+        out_notes.extend(extra_notes)
+
+    results, summary = cscv_pbo_stability(
+        m, n_blocks=n_blocks, annual_days=annual_days, n_offsets=n_offsets
+    )
+    representative = min(results, key=lambda r: abs(r.pbo - summary["pbo_median"]))
+    rho = average_config_correlation(m)
+
+    null: PBONull | None = None
+    if n_null_sims > 0:
+        null = pbo_null_distribution(
+            n_obs=representative.n_obs_used, n_configs=n_cols, n_blocks=n_blocks,
+            annual_days=annual_days, correlation=0.0 if not math.isfinite(rho) else max(rho, 0.0),
+            n_sims=n_null_sims, seed=seed,
+        )
+
     diagnosis = sample_size_diagnosis(
         n_obs=n_obs, n_blocks=n_blocks, annual_days=annual_days,
-        trades_total=max(1, int(round(avg_round_trips))),
+        trades_total=(
+            max(1, int(round(avg_round_trips))) if avg_round_trips is not None else None
+        ),
     )
     if math.isfinite(rho) and rho > 0.95:
-        notes.append(
+        out_notes.append(
             f"参数组间平均相关 {rho:.3f} > 0.95：网格里实际上只有一个策略，"
             f"「N 组参数」的多样性是假的"
         )
     return PBOStudy(
         result=representative, stability=summary, null=null, diagnosis=diagnosis,
-        correlation=rho, matrix_shape=(n_obs, n_cols), notes=notes,
+        correlation=rho, matrix_shape=(n_obs, n_cols), notes=out_notes,
     )
 
 
