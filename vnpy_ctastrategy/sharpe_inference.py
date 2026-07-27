@@ -40,11 +40,13 @@ if TYPE_CHECKING:                           # pragma: no cover - 仅供类型检
 
 # 标成 Any 而不是给 None 赋值加 type: ignore —— 那条 ignore 只在**装了** scipy
 # 的环境里是必要的；CI 不装 scipy(workflow 只装 vnpy ruff mypy uv),配合
-# ignore_missing_imports 这个模块解析成 Any,给 Any 赋 None 无需 ignore,于是
-# warn_unused_ignores 反过来把它判成错。Any 标注对两种环境都成立。
-_scipy_stats: Any
+# ignore_missing_imports 这个模块解析成 Any,给 Any 赋 None 无需忽略注释,于是
+# warn_unused_ignores 反过来把它判成错。改成先 import 到别名、再赋给一个带
+# Any 标注的名字:两种环境都成立。不能写成先裸标注 `_scipy_stats: Any` 再
+# import as 同名 —— 裸标注本身算一次定义,import 会被判 no-redef(CI 实测)。
 try:                                        # scipy 只用于 t 分布与卡方分布
-    from scipy import stats as _scipy_stats
+    from scipy import stats as _stats_mod
+    _scipy_stats: Any = _stats_mod
     _HAS_SCIPY: bool = True
 except ImportError:                         # pragma: no cover - 环境相关
     _scipy_stats = None
