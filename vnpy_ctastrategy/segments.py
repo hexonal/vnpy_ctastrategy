@@ -97,6 +97,7 @@ __all__ = [
     "make_three_way_split",
     "run_holdout",
     "split_by_ratio",
+    "valid_contradicts_train",
 ]
 
 
@@ -522,6 +523,30 @@ class SegmentedRunner:
 # 4. 一次性 holdout
 # ══════════════════════════════════════════════════════════════════════
 
+def valid_contradicts_train(
+    train_target: float, valid_target: float, target_name: str
+) -> str | None:
+    """选中参数在 VALID 段翻负、TRAIN 段却为正时的警告文本；不满足返回 None。
+
+    这是 VALID 段唯一的产出：**它不改选择**（改了它就变成第二个选参段），
+    它只回答"选中的参数换一段样本内数据还站不站得住"。站不住时，测试段
+    结果无论好看难看都已经失去解释力 —— 因为样本内两段就已经互相打脸。
+
+    单独抽成函数是因为它有两个调用点（`run_holdout` 与 `segment_cli` 的
+    select 档）。判据与措辞只能有一份：两份迟早会漂成两套口径。
+    """
+    if not (np.isfinite(valid_target) and np.isfinite(train_target)):
+        return None
+    if not valid_target <= 0.0 < train_target:
+        return None
+    return (
+        f"选中参数在 VALID 段的 {target_name}={valid_target:.4f} ≤ 0，"
+        f"而 TRAIN 段为 {train_target:.4f}：样本内两段已经不一致，"
+        f"TEST 段结果无论好坏都不足以支撑结论"
+    )
+
+
+
 @dataclass
 class HoldoutReport:
     """一次三段 holdout 的全部结果。
@@ -695,18 +720,13 @@ def run_holdout(
             "零成交不等于'样本外持平'"
         )
 
-    valid_target = valid_result.target(target_name)
-    train_target = train_results[chosen].target(target_name)
-    if (
-        np.isfinite(valid_target)
-        and np.isfinite(train_target)
-        and valid_target <= 0.0 < train_target
-    ):
-        warnings.append(
-            f"选中参数在 VALID 段的 {target_name}={valid_target:.4f} ≤ 0，"
-            f"而 TRAIN 段为 {train_target:.4f}：样本内两段已经不一致，"
-            f"TEST 段结果无论好坏都不足以支撑结论"
-        )
+    contradiction = valid_contradicts_train(
+        train_results[chosen].target(target_name),
+        valid_result.target(target_name),
+        target_name,
+    )
+    if contradiction is not None:
+        warnings.append(contradiction)
 
     # ── 5. TEST 段显著性 ───────────────────────────────────────────
     test_sig: SignificanceResult | None = None
