@@ -80,7 +80,17 @@ select = [
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.10"
+# 3.12 而不是上面 requires-python 的 3.10 —— 这不是放宽，是让检查真的发生。
+#
+# numpy 的存根用了 PEP 695 的 `type X = ...`（3.12+）。按 3.10 解析它会得到
+# 一个语法错，mypy 随即打印 "errors prevented further checking" 并退出 1 ——
+# 于是 CI 的类型检查这一步长期**一行本仓代码都没检查过**，只是稳定地红着。
+# （numpy 2.5.1 自身 requires-python 就是 >=3.12，两个版本约束本就不可能同时成立。）
+#
+# 代价说清楚：mypy 不再校验 3.10/3.11 的兼容性。语法层面的版本兼容由
+# ruff 的 target-version = "py310" 兜着；真要保证 3.10 可跑，得靠一条
+# 在 3.10 上装老 numpy 的 CI 矩阵，那是另一件事。
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

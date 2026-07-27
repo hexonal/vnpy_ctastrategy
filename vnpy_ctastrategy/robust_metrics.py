@@ -200,8 +200,9 @@ def rar_sample_weights(n: int) -> np.ndarray:
     if n <= 0:
         return np.array([], dtype=float)
     j = np.arange(1, n + 1, dtype=float)
-    weights = (n * n - j * j)
-    total = weights.sum()
+    weights: np.ndarray = (n * n - j * j)
+    # ndarray.sum() 在 numpy 存根里回 Any，会把整个表达式的类型抹掉。
+    total: float = float(weights.sum())
     if total == 0:
         return np.zeros(n, dtype=float)
     return weights / total * n
