@@ -945,7 +945,14 @@ class EngineRunner:
 
         已经带时区的时刻原样返回：它本来就指名了一个瞬间。
         """
-        return localize_bound(moment, self.exchange)
+        # 先绑到带标注的局部变量再 return,而不是直接 return 调用结果。
+        # CI 不安装 vnpy_gatewaykit(私有仓,workflow 只装 vnpy ruff mypy uv),
+        # 那边 localize_bound 解析成 Any,直接 return 会撞 warn_return_any。
+        # 绑定在两种环境下都成立且都不冗余:装齐时是 datetime -> datetime,
+        # 缺依赖时是 Any -> datetime。(用 cast 会在装齐那边被判 redundant-cast;
+        # 用类型忽略注释会在装齐那边被 warn_unused_ignores 判成未使用。)
+        localized: datetime = localize_bound(moment, self.exchange)
+        return localized
 
     def bars(self) -> list[BarData]:
         """整段历史 K 线（惰性加载，进程内只查一次数据库）。"""

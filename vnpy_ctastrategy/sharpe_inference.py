@@ -30,7 +30,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -38,11 +38,16 @@ if TYPE_CHECKING:                           # pragma: no cover - 仅供类型检
     from pandas import DataFrame
 
 
+# 标成 Any 而不是给 None 赋值加 type: ignore —— 那条 ignore 只在**装了** scipy
+# 的环境里是必要的；CI 不装 scipy(workflow 只装 vnpy ruff mypy uv),配合
+# ignore_missing_imports 这个模块解析成 Any,给 Any 赋 None 无需 ignore,于是
+# warn_unused_ignores 反过来把它判成错。Any 标注对两种环境都成立。
+_scipy_stats: Any
 try:                                        # scipy 只用于 t 分布与卡方分布
     from scipy import stats as _scipy_stats
     _HAS_SCIPY: bool = True
 except ImportError:                         # pragma: no cover - 环境相关
-    _scipy_stats = None                     # type: ignore[assignment]
+    _scipy_stats = None
     _HAS_SCIPY = False
 
 
