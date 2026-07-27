@@ -212,6 +212,20 @@ class CtaEngine(BaseEngine):
         # Update GUI
         self.put_strategy_event(strategy)
 
+    def _any_order_live(self, vt_orderids: list) -> bool:
+        """至少有一张委托没被拒 —— 即保护单确实进了场。
+
+        只在能查到订单时才判断。查不到（网关未推、或推送晚于返回）按**已受理**
+        处理：宁可漏拦一次也不能因为查询时序把一张真正在场内的委托当成没发出去，
+        那会导致重复下单。真正的拒单是同步推送的（_reject 在返回前就调了
+        on_order），所以这条乐观兜底不会放过本函数要防的那个场景。
+        """
+        for vt_orderid in vt_orderids:
+            order: OrderData | None = self.main_engine.get_order(vt_orderid)
+            if order is None or order.status is not Status.REJECTED:
+                return True
+        return False
+
     def check_stop_order(self, tick: TickData) -> None:
         """"""
         for stop_order in list(self.stop_orders.values()):
@@ -251,8 +265,28 @@ class CtaEngine(BaseEngine):
                     stop_order.net
                 )
 
-                # Update stop order status if placed successfully
-                if vt_orderids:
+                # Update stop order status if placed successfully.
+                #
+                # A non-empty vt_orderids is NOT proof the order was accepted.
+                # BaseGateway's contract makes send_order always return an id,
+                # so a gateway that refuses the request locally (gatewaykit's
+                # RejectOrderMixin._reject, or a broker rejection echoed back)
+                # still hands back a perfectly ordinary-looking id. Retiring the
+                # stop on that leaves the position with no protection at all,
+                # tells the strategy it has exited, and logs nothing — the
+                # worst of the three possible outcomes.
+                #
+                # This is reachable, not hypothetical: the trigger price above
+                # is `tick.limit_up or tick.ask_price_5`, and gateways for
+                # markets without daily limits (HK/US) never set limit_up, so
+                # it falls through to ask_price_5 — which is 0.0 whenever the
+                # book is thinner than five levels. A 0.0 price is then refused
+                # by the "限价/止损单价须 > 0" guard.
+                #
+                # If nothing reached the book, the stop stays armed and retries
+                # on the next tick. Staying armed can at worst re-send; going
+                # quiet leaves the position naked.
+                if vt_orderids and self._any_order_live(vt_orderids):
                     # Remove from relation map.
                     self.stop_orders.pop(stop_order.stop_orderid)
 
@@ -268,6 +302,18 @@ class CtaEngine(BaseEngine):
                         strategy, strategy.on_stop_order, stop_order
                     )
                     self.put_stop_order_event(stop_order)
+                else:
+                    # 保护单没进场。停止单原样留在 stop_orders 里，下一个 tick
+                    # 再试；策略不收 on_stop_order，因为它并没有离场。
+                    # 必须喊出来：静默是这条路径最贵的部分 —— 仓位无保护，
+                    # 而屏幕上一切如常。
+                    self.write_log(
+                        _("止损触发但保护单未成交：{} 价 {}，委托被拒，"
+                          "停止单保持挂起将在下个 tick 重试").format(
+                            stop_order.vt_symbol, price
+                        ),
+                        strategy,
+                    )
 
     def send_server_order(
         self,
