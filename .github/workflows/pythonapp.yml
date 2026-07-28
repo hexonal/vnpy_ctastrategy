@@ -46,7 +46,9 @@ jobs:
         # scipy 在本包运行时是可选的（sharpe_inference.py 用 try/except 导入，
         # 缺了就退化成正态近似），但测试要验的正是 t 分布与卡方分布那两条路径，
         # 所以 CI 必须装上，否则收集阶段就 ModuleNotFoundError。
-        pip install scipy
+        # vnpy_sqlite：vnpy 的默认数据库驱动，get_database() 运行时按名加载，
+        # 不在任何 install_requires 里，但回测引擎一启动就要它。
+        pip install scipy vnpy_sqlite
         pytest tests -q
 
     - name: Build packages with uv
