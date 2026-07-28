@@ -425,6 +425,50 @@ class LogMonitor(BaseMonitor):
         self.resizeRowToContents(0)
 
 
+
+# 参数的中文标签与说明。
+#
+# SettingEditor 是靠反射生成的，原先直接把 `f"{name} {type_}"` 当标签 ——
+# 屏幕上就是 `atr_length <class 'int'>` 这种。参数名对写策略的人够用，但
+# 对着界面填参数的人看不出 rsi_entry 到底是"阈值"还是"周期"，而
+# `<class 'int'>` 是 Python 的 repr 泄漏到了 UI 上。
+#
+# 这里只覆盖框架自带的通用字段与随包发布的示例策略。自定义策略可以在类上
+# 声明 `parameter_labels: dict[str, tuple[str, str]]`（标签, 说明）来接管，
+# 查不到就回落到参数名本身 —— 宁可显示原名，也不猜一个可能是错的中文。
+_PARAM_LABELS: dict[str, tuple[str, str]] = {
+    # 每个策略实例都有的两个
+    "strategy_name": ("策略实例名", "自己起的名字，用来在列表里区分同一策略的多个实例"),
+    "vt_symbol": ("交易标的", "格式为 代码.交易所，如 700.SEHK、NVDA.SMART"),
+    # AtrRsiStrategy（随包示例）
+    "atr_length": ("ATR 周期", "计算 ATR（真实波幅）用多少根 K 线"),
+    "atr_ma_length": ("ATR 均线周期", "对 ATR 再取均值，用来判断波动是否在放大"),
+    "rsi_length": ("RSI 周期", "计算 RSI 用多少根 K 线"),
+    "rsi_entry": ("RSI 进场阈值", "多头需 RSI>50+该值，空头需 RSI<50−该值。填 16 即 66/34"),
+    "trailing_percent": ("移动止损 %", "多头止损 = 持仓期最高价 ×(1 − 该值/100)"),
+    "fixed_size": ("每次下单数量", "港股须为每手股数的整数倍"),
+    # 其它随包示例策略的常见字段
+    "boll_window": ("布林带周期", ""),
+    "boll_dev": ("布林带标准差倍数", ""),
+    "cci_window": ("CCI 周期", ""),
+    "fast_window": ("快线周期", ""),
+    "slow_window": ("慢线周期", ""),
+}
+
+_TYPE_NAMES: dict[type, str] = {str: "文本", int: "整数", float: "小数", bool: "是/否"}
+
+
+def describe_parameter(name: str, type_: type) -> tuple[str, str]:
+    """参数名 -> (显示标签, 悬停说明)。查不到就用原名，不编中文。"""
+    label, hint = _PARAM_LABELS.get(name, ("", ""))
+    shown = f"{label}（{name}）" if label else name
+    type_name = _TYPE_NAMES.get(type_, type_.__name__)
+    tip = f"{name} · {type_name}"
+    if hint:
+        tip = f"{tip}\n{hint}"
+    return shown, tip
+
+
 class SettingEditor(QtWidgets.QDialog):
     """
     For creating new strategy and editing strategy parameters.
@@ -470,7 +514,11 @@ class SettingEditor(QtWidgets.QDialog):
                 double_validator: QtGui.QDoubleValidator = QtGui.QDoubleValidator()
                 edit.setValidator(double_validator)
 
-            form.addRow(f"{name} {type_}", edit)
+            shown, tip = describe_parameter(name, type_)
+            edit.setToolTip(tip)
+            label = QtWidgets.QLabel(shown)
+            label.setToolTip(tip)
+            form.addRow(label, edit)
 
             self.edits[name] = (edit, type_)
 
