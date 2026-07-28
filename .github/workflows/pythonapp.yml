@@ -26,6 +26,21 @@ jobs:
       run: |
         # Run mypy type checking based on pyproject.toml configuration
         mypy vnpy_ctastrategy
+    # 本仓测试有 4 处 import vnpy_gatewaykit。该仓此前私有、CI 装不到，
+    # 所以 578 个用例一直没进 CI；它现在已公开，用 runner 自带的
+    # GITHUB_TOKEN 就能 checkout，不需要 PAT。
+    - name: Checkout vnpy_gatewaykit
+      uses: actions/checkout@v7
+      with:
+        repository: hexonal/vnpy_gatewaykit
+        path: _deps/vnpy_gatewaykit
+
+    - name: Test
+      run: |
+        pip install pytest
+        pip install -e _deps/vnpy_gatewaykit
+        pytest tests -q
+
     - name: Build packages with uv
       run: |
         # Build source distribution and wheel distribution
