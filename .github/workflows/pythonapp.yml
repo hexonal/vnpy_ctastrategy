@@ -39,6 +39,10 @@ jobs:
       run: |
         pip install pytest
         pip install -e _deps/vnpy_gatewaykit
+        # 本仓自己也要装：CI 原先只装 `vnpy ruff mypy uv`，从不装本包，
+        # 所以 import vnpy_ctastrategy 会 ModuleNotFoundError。
+        # mypy/ruff 走文件路径不受影响，正因如此这个缺口一直没被发现。
+        pip install -e .
         pytest tests -q
 
     - name: Build packages with uv
