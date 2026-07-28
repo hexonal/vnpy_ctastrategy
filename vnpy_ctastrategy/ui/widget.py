@@ -105,7 +105,12 @@ class CtaManager(QtWidgets.QWidget):
         """"""
         names = self.cta_engine.get_all_strategy_class_names()
         names.sort()
-        self.class_combo.addItems(names)
+        for name in names:
+            shown, hint = describe_strategy(name)
+            self.class_combo.addItem(shown, userData=name)
+            self.class_combo.setItemData(
+                self.class_combo.count() - 1, hint, QtCore.Qt.ItemDataRole.ToolTipRole
+            )
 
     def update_strategy_combo(self) -> None:
         """"""
@@ -149,7 +154,9 @@ class CtaManager(QtWidgets.QWidget):
 
     def add_strategy(self) -> None:
         """"""
-        class_name: str = str(self.class_combo.currentText())
+        # 读 userData 而不是 currentText：显示文本带了中文说明
+        # （`AtrRsiStrategy · ATR+RSI 波动突破`），类名只在 userData 里。
+        class_name: str = str(self.class_combo.currentData())
         if not class_name:
             return
 
@@ -424,6 +431,61 @@ class LogMonitor(BaseMonitor):
         super().insert_new_row(data)
         self.resizeRowToContents(0)
 
+
+
+
+# 随包示例策略的中文名与一句话说明。
+#
+# 下拉框里原本只有类名（AtrRsiStrategy / DualThrustStrategy …）。对读过源码
+# 的人够用，但对着界面选策略的人看不出它们分别用什么方法 —— 而选错策略再
+# 回测，浪费的是时间和对结果的信任。
+#
+# 说明取自各策略 on_bar 的实际逻辑，不是照名字猜的。查不到就只显示类名。
+_STRATEGY_LABELS: dict[str, tuple[str, str]] = {
+    "AtrRsiStrategy": (
+        "ATR+RSI 波动突破",
+        "ATR 高于其均线（波动放大）时，按 RSI 突破 50±阈值 进场；持仓后按百分比移动止损",
+    ),
+    "BollChannelStrategy": (
+        "布林通道 + CCI 过滤",
+        "价格突破布林带上下轨进场，CCI 决定允许的方向，ATR 做移动止损",
+    ),
+    "DoubleMaStrategy": (
+        "双均线交叉",
+        "快慢 SMA 金叉做多、死叉做空。最经典的入门策略，用来跑通流程",
+    ),
+    "DualThrustStrategy": (
+        "Dual Thrust 开盘区间突破",
+        "用前一日振幅算上下轨（开盘价 ± K×前日Range），日内突破进场、收盘前平",
+    ),
+    "KingKeltnerStrategy": (
+        "肯特纳通道突破",
+        "中轨 ± ATR 构成通道，突破进场。Chester Keltner 的经典通道方法",
+    ),
+    "MultiSignalStrategy": (
+        "多信号投票",
+        "RSI / CCI / 均线 三个子信号各投一票，方向一致才进场",
+    ),
+    "MultiTimeframeStrategy": (
+        "多周期共振",
+        "15 分钟定趋势方向，5 分钟找具体入场点",
+    ),
+    "TestStrategy": (
+        "测试骨架（不交易）",
+        "on_bar 是 pass，不产生任何委托。只用来确认事件回调是否跑通，别拿它回测",
+    ),
+    "TurtleSignalStrategy": (
+        "海龟法则（信号版）",
+        "唐奇安通道突破进场，用 ATR（N 值）定止损距离与加仓间距",
+    ),
+}
+
+
+def describe_strategy(class_name: str) -> tuple[str, str]:
+    """策略类名 -> (显示文本, 悬停说明)。查不到只显示类名，不编中文。"""
+    label, hint = _STRATEGY_LABELS.get(class_name, ("", ""))
+    shown = f"{class_name} · {label}" if label else class_name
+    return shown, (hint or class_name)
 
 
 # 参数的中文标签与说明。
