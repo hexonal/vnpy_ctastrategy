@@ -1,4 +1,5 @@
 from vnpy.event import Event, EventEngine
+from vnpy.trader.constant import Exchange
 from vnpy.trader.engine import MainEngine
 from vnpy.trader.ui import QtCore, QtGui, QtWidgets
 from vnpy.trader.ui.widget import BaseCell, BaseMonitor, EnumCell, MsgCell, TimeCell
@@ -161,7 +162,9 @@ class CtaManager(QtWidgets.QWidget):
             return
 
         parameters: dict = self.cta_engine.get_strategy_class_parameters(class_name)
-        editor: SettingEditor = SettingEditor(parameters, class_name=class_name)
+        editor: SettingEditor = SettingEditor(
+            parameters, class_name=class_name, vt_symbols=self._known_vt_symbols()
+        )
         n: int = editor.exec_()
 
         if n == editor.DialogCode.Accepted:
@@ -169,9 +172,24 @@ class CtaManager(QtWidgets.QWidget):
             vt_symbol: str = setting.pop("vt_symbol")
             strategy_name: str = setting.pop("strategy_name")
 
+            problem: str = _bad_vt_symbol(vt_symbol)
+            if problem:
+                # 引擎侧同样会拒（engine.py:679-686），但它只写一行日志，
+                # 而对话框此时已经关了 —— 用户看到的是"什么都没发生"。
+                # 在这里当场弹出来，说清楚哪儿不对。
+                QtWidgets.QMessageBox.warning(self, _("添加策略"), problem)
+                return
+
             self.cta_engine.add_strategy(
                 class_name, strategy_name, vt_symbol, setting
             )
+
+    def _known_vt_symbols(self) -> list[str]:
+        """本地已知合约的本地代码，带上名称便于辨认（取值时只取第一段）。"""
+        contracts = self.cta_engine.main_engine.get_all_contracts()
+        return sorted(
+            f"{c.symbol}.{c.exchange.value} {c.name}".rstrip() for c in contracts
+        )
 
     def find_strategy(self) -> None:
         """"""
@@ -531,20 +549,52 @@ def describe_parameter(name: str, type_: type) -> tuple[str, str]:
     return shown, tip
 
 
+def _bad_vt_symbol(vt_symbol: str) -> str:
+    """本地代码不合法时的说明；合法则返回空串。
+
+    与引擎的判据保持一致（engine.py:679-686）：必须是 `代码.交易所`，
+    且后缀得是 Exchange 里真实存在的那些。这里先拦一道，是为了让失败
+    出现在用户还看着对话框的时候，而不是事后在日志里躺一行。
+    """
+    if not vt_symbol:
+        return _("请填写交易标的，格式为 代码.交易所，如 700.SEHK、NVDA.SMART")
+    if "." not in vt_symbol:
+        return _("交易标的缺少交易所后缀：{}。正确写法形如 700.SEHK、NVDA.SMART").format(
+            vt_symbol
+        )
+    exchange_str = vt_symbol.rsplit(".", 1)[1]
+    if exchange_str not in Exchange.__members__:
+        return _("交易所后缀 {} 不是有效交易所。美股用 SMART，港股用 SEHK。").format(
+            exchange_str
+        )
+    return ""
+
+
 class SettingEditor(QtWidgets.QDialog):
     """
     For creating new strategy and editing strategy parameters.
     """
 
     def __init__(
-        self, parameters: dict, strategy_name: str = "", class_name: str = ""
+        self,
+        parameters: dict,
+        strategy_name: str = "",
+        class_name: str = "",
+        vt_symbols: list[str] | None = None,
     ) -> None:
-        """"""
+        """vt_symbols 给出时，交易标的一栏变成可搜索下拉。
+
+        这一栏要的是 `代码.交易所`（700.SEHK）。格式只写在 tooltip 里，
+        得悬停才看得见，而输入框本身是个空白 —— 用户填了裸代码，对话框照常
+        关闭，失败只落在日志面板一行"本地代码缺失交易所后缀"，很容易漏看。
+        给出本地已知合约让人直接挑，格式问题就不会发生。
+        """
         super().__init__()
 
         self.parameters: dict = parameters
         self.strategy_name: str = strategy_name
         self.class_name: str = class_name
+        self.vt_symbols: list[str] = vt_symbols or []
 
         self.edits: dict = {}
 
@@ -568,7 +618,11 @@ class SettingEditor(QtWidgets.QDialog):
         for name, value in parameters.items():
             type_: type = type(value)
 
-            edit: QtWidgets.QLineEdit = QtWidgets.QLineEdit(str(value))
+            edit: QtWidgets.QWidget
+            if name == "vt_symbol" and self.vt_symbols:
+                edit = self._symbol_box()
+            else:
+                edit = QtWidgets.QLineEdit(str(value))
             if type_ is int:
                 int_validator: QtGui.QIntValidator = QtGui.QIntValidator()
                 edit.setValidator(int_validator)
@@ -599,6 +653,24 @@ class SettingEditor(QtWidgets.QDialog):
         vbox.addWidget(scroll)
         self.setLayout(vbox)
 
+    def _symbol_box(self) -> QtWidgets.QComboBox:
+        """本地已知合约的可搜索下拉；不在列表里的代码仍可手输。
+
+        用原生 QComboBox 而不是别处那个 SearchableComboBox：后者住在 vnpy_app,
+        本包不依赖它，反向 import 会把依赖方向倒过来。
+        """
+        box: QtWidgets.QComboBox = QtWidgets.QComboBox()
+        box.setEditable(True)
+        box.addItem("")                             # 留一个空项，默认不预选任何标的
+        box.addItems(self.vt_symbols)
+        box.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+
+        completer: QtWidgets.QCompleter = QtWidgets.QCompleter(self.vt_symbols, box)
+        completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(QtCore.Qt.MatchFlag.MatchContains)
+        box.setCompleter(completer)
+        return box
+
     def get_setting(self) -> dict:
         """"""
         setting: dict = {}
@@ -608,7 +680,11 @@ class SettingEditor(QtWidgets.QDialog):
 
         for name, tp in self.edits.items():
             edit, type_ = tp
-            value_text = edit.text()
+            # 下拉与输入框取值方式不同；下拉的显示文本可能带名称，取第一段。
+            if isinstance(edit, QtWidgets.QComboBox):
+                value_text = str(edit.currentText()).strip().split(" ", 1)[0]
+            else:
+                value_text = edit.text()
 
             # bool("False") 是 True，所以布尔项不能走 type_(value_text)
             value = (value_text == "True") if type_ is bool else type_(value_text)
