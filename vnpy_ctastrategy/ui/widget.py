@@ -342,6 +342,28 @@ class StrategyManager(QtWidgets.QFrame):
             self.cta_manager.remove_strategy(self.strategy_name)
 
 
+def _display(value: object) -> str:
+    """单元格里显示的文本。
+
+    浮点数按 4 位小数截断：ATR 这类算出来的值 str() 后是
+    `1.1276457926121324`，把列撑爆还得靠横向滚动才看得全，而后面十几位
+    对看盘没有任何意义。完整值放进 tooltip，一位都不丢。
+
+    布尔值转"是/否"：这两栏（已初始化/允许交易）是给人看的状态，
+    True/False 是程序员的写法。
+    """
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, float):
+        text = f"{value:.4f}".rstrip("0").rstrip(".")
+        # 截到 4 位后变成 0 但本身不是 0 —— 直接印 "0" 就成了谎报"没有值"。
+        # 这种量级改用科学计数法，宁可难看也不能说错。
+        if value and float(text or 0) == 0:
+            return f"{value:.4g}"
+        return text or "0"
+    return str(value)
+
+
 class DataMonitor(QtWidgets.QTableWidget):
     """
     Table monitor for parameters and variables.
@@ -358,10 +380,7 @@ class DataMonitor(QtWidgets.QTableWidget):
 
     def init_ui(self) -> None:
         """"""
-        labels: list = list(self._data.keys())
-        self.setColumnCount(len(labels))
-        self.setHorizontalHeaderLabels(labels)
-
+        self.setColumnCount(len(self._data))
         self.setRowCount(1)
         self.verticalHeader().setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.Stretch
@@ -371,9 +390,17 @@ class DataMonitor(QtWidgets.QTableWidget):
 
         for column, name in enumerate(self._data.keys()):
             value = self._data[name]
+            shown, tip = describe_parameter(name, type(value))
 
-            cell: QtWidgets.QTableWidgetItem = QtWidgets.QTableWidgetItem(str(value))
+            # 表头用中文标签，原字段名进 tooltip：这两张表原先只印
+            # entry_up / atr_value 这种原名，对着界面看盘的人认不出是什么。
+            header: QtWidgets.QTableWidgetItem = QtWidgets.QTableWidgetItem(shown)
+            header.setToolTip(tip)
+            self.setHorizontalHeaderItem(column, header)
+
+            cell: QtWidgets.QTableWidgetItem = QtWidgets.QTableWidgetItem(_display(value))
             cell.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            cell.setToolTip(str(value))
 
             self.setItem(0, column, cell)
             self.cells[name] = cell
@@ -382,7 +409,8 @@ class DataMonitor(QtWidgets.QTableWidget):
         """"""
         for name, value in data.items():
             cell: QtWidgets.QTableWidgetItem = self.cells[name]
-            cell.setText(str(value))
+            cell.setText(_display(value))
+            cell.setToolTip(str(value))
 
 
 class StopOrderMonitor(BaseMonitor):
@@ -527,20 +555,83 @@ _PARAM_LABELS: dict[str, tuple[str, str]] = {
     "rsi_entry": ("RSI 进场阈值", "多头需 RSI>50+该值，空头需 RSI<50−该值。填 16 即 66/34"),
     "trailing_percent": ("移动止损 %", "多头止损 = 持仓期最高价 ×(1 − 该值/100)"),
     "fixed_size": ("每次下单数量", "港股须为每手股数的整数倍"),
-    # 其它随包示例策略的常见字段
-    "boll_window": ("布林带周期", ""),
-    "boll_dev": ("布林带标准差倍数", ""),
-    "cci_window": ("CCI 周期", ""),
-    "fast_window": ("快线周期", ""),
-    "slow_window": ("慢线周期", ""),
+    # 其它随包示例策略的参数
+    "boll_window": ("布林带周期", "计算布林带中轨用多少根 K 线"),
+    "boll_dev": ("布林带标准差倍数", "上下轨 = 中轨 ± 该倍数 × 标准差"),
+    "cci_window": ("CCI 周期", "计算 CCI（顺势指标）用多少根 K 线"),
+    "cci_level": ("CCI 进场阈值", "CCI 超过 +该值转多、跌破 −该值转空"),
+    "fast_window": ("快线周期", "快速均线用多少根 K 线，对价格更敏感"),
+    "slow_window": ("慢线周期", "慢速均线用多少根 K 线，代表较长期方向"),
+    "atr_window": ("ATR 周期", "计算 ATR（真实波幅）用多少根 K 线"),
+    "rsi_window": ("RSI 周期", "计算 RSI 用多少根 K 线"),
+    "rsi_level": ("RSI 进场阈值", "多头需 RSI≥50+该值，空头需 RSI≤50−该值"),
+    "rsi_signal": ("RSI 信号周期", "RSI 子信号用多少根 K 线"),
+    "entry_window": ("进场通道周期", "唐奇安通道：突破近 N 根 K 线的最高/最低价即进场"),
+    "exit_window": ("离场通道周期", "跌破近 N 根 K 线的最低/最高价即离场，一般短于进场周期"),
+    "kk_length": ("肯特纳通道周期", "计算中轨与波幅用多少根 K 线"),
+    "kk_dev": ("肯特纳通道倍数", "上下轨 = 中轨 ± 该倍数 × 平均波幅"),
+    "k1": ("上轨系数 K1", "上轨 = 开盘价 + K1 × 昨日振幅，突破即做多"),
+    "k2": ("下轨系数 K2", "下轨 = 开盘价 − K2 × 昨日振幅，跌破即做空"),
+    "sl_multiplier": ("止损 ATR 倍数", "止损距持仓期最高/最低价 = 该倍数 × ATR"),
+    "test_trigger": ("测试触发间隔", "TestStrategy 专用：每收到多少个 tick 触发一次动作"),
+}
+
+# 运行时变量的中文标签。变量表是只读的实时状态，看不懂就等于没有。
+_VARIABLE_LABELS: dict[str, tuple[str, str]] = {
+    # 每个策略都有的三个（CtaTemplate 内置）
+    "inited": ("已初始化", "历史数据是否加载完毕。False 时策略不会动作"),
+    "trading": ("允许交易", "是否已启动。False 时只算指标、不发单"),
+    "pos": ("当前持仓", "正数为多头、负数为空头、0 为空仓（单位：手/股）"),
+    # 通用指标值
+    "atr_value": ("ATR 当前值", "平均真实波幅，衡量当前波动大小"),
+    "atr_ma": ("ATR 均线值", "ATR 自身的均值，用来判断波动是在放大还是收敛"),
+    "rsi_value": ("RSI 当前值", "0-100，>50 偏多、<50 偏空"),
+    "cci_value": ("CCI 当前值", "顺势指标当前读数"),
+    # 通道 / 均线上下轨
+    "entry_up": ("进场上轨", "近 N 根 K 线的最高价，向上突破它即做多"),
+    "entry_down": ("进场下轨", "近 N 根 K 线的最低价，向下跌破它即做空"),
+    "exit_up": ("离场上轨", "空头持仓时，涨破它即平仓"),
+    "exit_down": ("离场下轨", "多头持仓时，跌破它即平仓"),
+    "boll_up": ("布林带上轨", ""),
+    "boll_down": ("布林带下轨", ""),
+    "kk_up": ("肯特纳上轨", ""),
+    "kk_down": ("肯特纳下轨", ""),
+    # 均线
+    "fast_ma": ("快线当前值", ""),
+    "slow_ma": ("慢线当前值", ""),
+    "fast_ma0": ("快线当前值", "本根 K 线的快线值"),
+    "fast_ma1": ("快线前值", "上一根 K 线的快线值，与当前值比较判断金叉/死叉"),
+    "slow_ma0": ("慢线当前值", "本根 K 线的慢线值"),
+    "slow_ma1": ("慢线前值", "上一根 K 线的慢线值"),
+    "ma_trend": ("均线方向", "1 为金叉（快线上穿慢线），−1 为死叉"),
+    # 进出场价位
+    "long_entry": ("多头进场价", "触及该价即开多"),
+    "short_entry": ("空头进场价", "触及该价即开空"),
+    "long_stop": ("多头止损价", "多头持仓跌破该价即平仓"),
+    "short_stop": ("空头止损价", "空头持仓涨破该价即平仓"),
+    "intra_trade_high": ("持仓期最高价", "本次持仓以来的最高价，移动止损以它为锚"),
+    "intra_trade_low": ("持仓期最低价", "本次持仓以来的最低价，空头移动止损以它为锚"),
+    # RSI 派生阈值
+    "rsi_buy": ("RSI 做多线", "= 50 + RSI 进场阈值，RSI 高于它才做多"),
+    "rsi_sell": ("RSI 做空线", "= 50 − RSI 进场阈值，RSI 低于它才做空"),
+    "rsi_long": ("RSI 做多线", "= 50 + RSI 进场阈值"),
+    "rsi_short": ("RSI 做空线", "= 50 − RSI 进场阈值"),
+    # 其它
+    "day_range": ("昨日振幅", "昨日最高价 − 最低价，用来推算今日上下轨"),
+    "tick_count": ("已收 tick 数", "TestStrategy 专用计数器"),
+    "test_all_done": ("测试是否完成", "TestStrategy 专用标志"),
 }
 
 _TYPE_NAMES: dict[type, str] = {str: "文本", int: "整数", float: "小数", bool: "是/否"}
 
 
 def describe_parameter(name: str, type_: type) -> tuple[str, str]:
-    """参数名 -> (显示标签, 悬停说明)。查不到就用原名，不编中文。"""
-    label, hint = _PARAM_LABELS.get(name, ("", ""))
+    """字段名 -> (显示标签, 悬停说明)。查不到就用原名，不编中文。
+
+    参数与运行时变量共用这一个入口：两张表长得一样、坐在同一个面板里，
+    对着看的人不区分"这是我填的"还是"这是策略算的"，只想知道它是什么。
+    """
+    label, hint = _PARAM_LABELS.get(name) or _VARIABLE_LABELS.get(name, ("", ""))
     shown = f"{label}（{name}）" if label else name
     type_name = _TYPE_NAMES.get(type_, type_.__name__)
     tip = f"{name} · {type_name}"
