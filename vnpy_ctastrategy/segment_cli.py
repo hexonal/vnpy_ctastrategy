@@ -42,6 +42,7 @@ GUI（`vnpy_ctabacktester`）也没有三段的概念 —— 它只有一组 sta
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -403,8 +404,26 @@ def _build_settings(args: argparse.Namespace) -> list[dict]:
     return settings
 
 
+def _force_utf8_output() -> None:
+    """让本 CLI 的输出在 Windows 上也能打出中文。
+
+    Windows 控制台默认走 cp1252/charmap 之类的本地代码页，装不下我们输出里的
+    中文与 ━ ⚠ → 这些符号，print 会直接抛 UnicodeEncodeError 把进程打死 ——
+    CI 的 Windows runner 上实测就是这么崩的（segment_cli 子进程 returncode=1，
+    stderr 是 'charmap' codec can't encode characters）。
+
+    改流的编码而不是把中文换掉：vnpy 生态本身是中文项目，输出中文是刻意的。
+    errors="replace" 兜底，宁可某个字符显示成 ? 也不要整个进程挂掉。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:          # 被重定向成非 TextIO 时没有此方法
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """命令行入口。返回 0=跑完 / 1=被账本拒绝 / 2=数据或参数不成立。"""
+    _force_utf8_output()
     from vnpy.trader.constant import Interval
 
     from .overfitting import EngineRunner
