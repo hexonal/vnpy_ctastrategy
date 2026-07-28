@@ -43,6 +43,10 @@ jobs:
         # 所以 import vnpy_ctastrategy 会 ModuleNotFoundError。
         # mypy/ruff 走文件路径不受影响，正因如此这个缺口一直没被发现。
         pip install -e .
+        # scipy 在本包运行时是可选的（sharpe_inference.py 用 try/except 导入，
+        # 缺了就退化成正态近似），但测试要验的正是 t 分布与卡方分布那两条路径，
+        # 所以 CI 必须装上，否则收集阶段就 ModuleNotFoundError。
+        pip install scipy
         pytest tests -q
 
     - name: Build packages with uv
