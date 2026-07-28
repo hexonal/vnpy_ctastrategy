@@ -346,7 +346,7 @@ def test_module_is_runnable_and_help_names_the_stages() -> None:
     """`python -m vnpy_ctastrategy.segment_cli --help` —— GUI 提示里印的就是它。"""
     result = subprocess.run(
         [sys.executable, "-m", "vnpy_ctastrategy.segment_cli", "--help"],
-        capture_output=True, text=True, timeout=180,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
     )
     assert result.returncode == 0, result.stderr
     assert "--stage" in result.stdout
