@@ -115,6 +115,26 @@ class TurtleSignalStrategy(CtaTemplate):
             self.short_entry = trade.price
             self.short_stop = self.short_entry + 2 * self.atr_value
 
+    def get_stop_price(
+        self, vt_symbol: str, direction: Direction, price: float
+    ) -> float | None:
+        """海龟的 2N 止损，按**本笔委托的报价**算，而不是按已成交的入场价。
+
+        `on_trade` 里的 `long_stop = long_entry - 2 * atr_value` 是同一条规则，
+        但它在成交之后才有值；风控闸要在下单之前就看到止损，所以这里用即将
+        报出去的 `price` 代入同一个公式。两者在成交价等于报价时完全一致。
+
+        `atr_value` 为 0 时返回 None 而不是返回 `price`：ArrayManager 还没
+        `inited`（或刚清过仓、ATR 尚未重算）时 N 是 0，止损等于入场价 ——
+        那不是止损，`check_stop_side` 也会以「该止损不提供保护」拒掉它。
+        如实说「现在声明不了」，让委托被拒得有理由可查。
+        """
+        if self.atr_value <= 0:
+            return None
+        if direction == Direction.LONG:
+            return price - 2 * self.atr_value
+        return price + 2 * self.atr_value
+
     def on_order(self, order: OrderData) -> None:
         """
         Callback of new order data update.

@@ -152,6 +152,22 @@ class CtaTemplate(ABC):
         """
         return
 
+    def get_stop_price(
+        self, vt_symbol: str, direction: Direction, price: float
+    ) -> float | None:
+        """本笔委托的申报止损价；返回 None 表示不声明。
+
+        实盘装配里，三条自研风控闸挂在 `MainEngine.send_order` 上，其中
+        「强制止损检查」要求任何**增敞口**的委托必须带止损价 —— 不声明的
+        开仓单会被拒绝（拒绝原因由 `CtaEngine` 写进日志）。所以要在实盘跑的
+        策略必须重写这个方法；回测不经过风控闸，不受影响。
+
+        签名与 `AlphaLiveEngine` 调用的钩子一致，同一个策略类在两个引擎下
+        声明止损的方式相同。返回值的编码与传输见
+        `vnpy_ctastrategy.stop_declaration`。
+        """
+        return None
+
     def buy(
         self,
         price: float,

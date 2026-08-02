@@ -48,6 +48,7 @@ from .base import (
     StopOrderStatus,
 )
 from .locale import _
+from .stop_declaration import explain_rejection, with_declared_stop
 from .template import CtaTemplate, TargetPosTemplate
 
 # 停止单状态映射
@@ -331,6 +332,20 @@ class CtaEngine(BaseEngine):
         Send a new order to server.
         """
         # Create request and send order.
+        #
+        # reference 带上策略声明的止损价：三条自研风控闸挂在
+        # MainEngine.send_order 上，其中「强制止损检查」要求增敞口委托必须
+        # 声明止损，而这个字段是唯一的传输载体（见 stop_declaration 模块）。
+        # 策略没声明时 reference 不带后缀，委托会被拒 —— 那是风控策略本身，
+        # 下面的 write_log 负责让这次拒绝可见。
+        reference: str = with_declared_stop(
+            f"{APP_NAME}_{strategy.strategy_name}",
+            strategy,
+            contract.vt_symbol,
+            direction,
+            price,
+        )
+
         original_req: OrderRequest = OrderRequest(
             symbol=contract.symbol,
             exchange=contract.exchange,
@@ -339,7 +354,7 @@ class CtaEngine(BaseEngine):
             type=type,
             price=price,
             volume=volume,
-            reference=f"{APP_NAME}_{strategy.strategy_name}"
+            reference=reference
         )
 
         # Convert with offset converter
@@ -357,7 +372,16 @@ class CtaEngine(BaseEngine):
             vt_orderid: str = self.main_engine.send_order(req, contract.gateway_name)
 
             # Check if sending order successful
+            #
+            # 空 vt_orderid 意味着委托没被接受 —— 最常见的是被风控闸拒掉。
+            # 这里原本只是 `continue`：返回空 list，策略 pos 恒为 0、
+            # on_order/on_trade 永不触发、不抛异常，屏幕上策略「运行中」而
+            # 实际一单都发不出去。静默是这条路径上最贵的部分，必须喊出来。
             if not vt_orderid:
+                self.write_log(
+                    explain_rejection(strategy.strategy_name, contract.vt_symbol, req.reference),
+                    strategy,
+                )
                 continue
 
             vt_orderids.append(vt_orderid)

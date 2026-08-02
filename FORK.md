@@ -229,3 +229,61 @@ statistics —— 每组参数的 `daily_df` 在子进程里算完就被丢掉�
 和真 driver 完全相同的代码路径。`TZ` 固定成美西,保证宿主机时区与市场时区
 必然不同 —— 否则断言全部落空。回归前实测 5 red(693 / 699 / 0 / ZeroDivision),
 修复后 11 green。
+
+### 5. CTA 委托带上申报止损 —— 开仓单曾 100% 被静默拒绝
+
+**症状**:界面上策略「运行中」,日志安静,`pos` 恒为 0,`on_order` / `on_trade`
+从不触发,也不抛异常。实际是**一单都没发出去**。
+
+**根因**(三处静默叠加,单看任何一处都像正常):
+
+1. 三条自研风控闸挂在 `MainEngine.send_order` 上(`vnpy_alphakit.rules`,由
+   `run_gui.py` / `run.py` 在 `add_app(RiskManagerApp)` 之后 `install_gate_rules()`
+   装上),其中「强制止损检查」要求任何**增敞口**委托必须声明止损价。
+2. 止损价的载体不是独立字段,而是 `OrderRequest.reference` 末尾的
+   `|stop=<价>` 后缀,而 `engine.py` 造的 reference 一直是
+   `f"{APP_NAME}_{strategy_name}"` —— 不带后缀,闸判为「增敞口且无止损」,
+   `send_order` 返回空字符串。
+3. `send_server_order` 拿到空 `vt_orderid` 只做 `continue`,返回空 list,
+   策略侧没有任何回调、异常或日志。
+
+装载顺序让这条路径必然被打到:`run_gui.py` 先 `install_gate_rules()` 再
+`add_app(CtaStrategyApp)`,GUI 一起来闸就已在 CTA 之前就位。
+
+**改法**:给策略一个声明止损的入口,而不是给 CTA 开后门。
+
+- **新增** `vnpy_ctastrategy/stop_declaration.py`(独立文件,与上游无重叠):
+  `declared_stop` / `with_declared_stop` / `explain_rejection`。编解码复用
+  `vnpy_gatewaykit.order_stop`(本次由 `vnpy_alphakit.gate` 下沉过去),
+  保证生产者与消费者共用同一个正则。
+- **改动** `template.py`:`CtaTemplate.get_stop_price()` 默认返回 None。
+  签名与 `AlphaLiveEngine` 调用的钩子一致,同一个策略类在两个引擎下声明
+  止损的方式相同。
+- **改动** `engine.py`:仅 3 处 —— import 一行、`send_server_order` 里造
+  reference 时过一次 `with_declared_stop`、空 `vt_orderid` 时 `write_log`。
+- **改动** `strategies/turtle_signal_strategy.py`:实现 `get_stop_price`,
+  用 2N 规则按**本笔报价**算(`on_trade` 里那行是同一公式的成交后版本)。
+
+**未选的方案**:给引擎加默认 `stop_loss_pct` 兜底。它能让现有策略立刻恢复
+下单,但那个止损价不是策略交易逻辑得出的,却会进入风控的风险核算
+(`|entry-stop| × volume × size`)决定仓位大小 —— 海龟的 2N 与拍脑袋的 5%
+在报表上看不出区别。策略不声明就拒单,是风控策略本身,不该绕过;这次改的是
+让拒绝**可见**,不是让它消失。
+
+**顺带修掉一个可达的绕过**:`strategy_name` 是界面上自由输入的文本,一个叫
+`my|stop=999` 的策略会让 reference 天然以合法止损后缀结尾,闸读成「已声明
+止损 999」并放行 —— 改名即可绕过强制止损闸。`with_declared_stop` 在未声明
+分支补了 `strip_stop`,两条分支都收口到「reference 里的止损只可能来自
+`get_stop_price`」。
+
+**一条诚实边界**:这里的止损是**申报值**,用于风控核算与过闸,不是券商侧
+止损单 —— Futu 与 uSMART 都不置 `ContractData.stop_supported`。保护性委托仍
+要靠策略自己挂本地停止单或人工处置。
+
+**新增依赖**:无(`vnpy_gatewaykit>=0.1.0` 已在 §4 引入)。
+
+**测试** 22 条:`tests/test_stop_declaration.py`(11,编解码)、
+`tests/test_engine_declares_stop.py`(6,引擎接线,不建真 `CtaEngine` 因而
+不需要 QuestDB)、`tests/test_turtle_stop_price.py`(5)。
+变异验证:摘掉 `engine.py` 的止损接线 -> 3 例转红;摘掉拒单日志 -> 2 例转红。
+全仓 633 例全过。
